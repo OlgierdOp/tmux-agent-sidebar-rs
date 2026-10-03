@@ -1,6 +1,6 @@
 //! The sidebar TUI of one pane.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -113,6 +113,10 @@ pub struct Ui {
     loaded: bool,
     last_poll: Instant,
     drawn_sel: Option<String>,
+    /// all tmux pane ids, as tmux lists them (`#{S:#{W:#{P:...}}}`)
+    panes: String,
+    /// closed panes: the worker may still deliver their agents (tmux never reuses an id)
+    gone: HashSet<String>,
     /// pane -> last live state seen by refresh_live
     live_prev: HashMap<String, String>,
     /// pane -> deadline to find "finished" in the transcript
@@ -190,6 +194,8 @@ impl Ui {
             loaded: false,
             last_poll: Instant::now(),
             drawn_sel: None,
+            panes: String::new(),
+            gone: HashSet::new(),
             live_prev: HashMap::new(),
             finishing: HashMap::new(),
             last_draw: Instant::now(),
@@ -270,12 +276,13 @@ impl Ui {
             "#{?window_active_clients,1,0}", "#{pane_width}",
             "#{@agent_sidebar_bg}", "#{P:#{?pane_active,#{pane_id},}}", "#{window_id}",
             "#{@agent_sidebar_focus}", "#{@agent_sidebar_order}", "#{@agent_sidebar_gen}",
+            "#{S:#{W:#{P:#{pane_id}}}}",
         ];
         let out = tmux!["display-message", "-p", "-t", self.me, fields.join(SEP)];
         let out = out.trim_end_matches('\n');
         let parts: Vec<&str> = out.split(SEP).collect();
         let [on, sel, only, home, own, panes, visible, width, bg, active, window, focus, order,
-             generation] = parts[..]
+             generation, all_panes] = parts[..]
         else {
             return Poll::Exit;
         };
@@ -290,7 +297,7 @@ impl Ui {
             // tmux scales panes proportionally when the window is resized
             tmux!["resize-pane", "-t", self.me, "-x", SIDEBAR_WIDTH.to_string()];
         }
-        let mut changed = false;
+        let mut changed = self.drop_closed(all_panes);
         let order: Vec<String> =
             order.split(ORDER_SEP).filter(|s| !s.is_empty()).map(str::to_string).collect();
         if order != self.order {
@@ -333,6 +340,30 @@ impl Ui {
             changed = true;
         }
         if changed { Poll::Changed } else { Poll::Same }
+    }
+
+    /// A pane closed: remove its agent now, without waiting for the worker.
+    /// True when the list changed.
+    fn drop_closed(&mut self, all_panes: &str) -> bool {
+        if all_panes == self.panes {
+            return false;
+        }
+        let alive: HashSet<&str> = all_panes.split('%').filter(|p| !p.is_empty()).collect();
+        if !self.panes.is_empty() {
+            for pane in self.panes.split('%').filter(|p| !p.is_empty() && !alive.contains(p)) {
+                self.gone.insert(format!("%{pane}"));
+            }
+        }
+        self.panes = all_panes.to_string();
+        self.wake.set(); // collect again: also for new panes
+        let before = self.all.len();
+        let gone = &self.gone;
+        self.all.retain(|a| !gone.contains(&a.pane));
+        if self.all.len() == before {
+            return false;
+        }
+        self.apply_filter();
+        true
     }
 
     /// Focus in an agent pane -> select that agent. Otherwise (focus in the
@@ -531,6 +562,7 @@ impl Ui {
         if generation != self.generation {
             return false; // collected before J/K swapped windows: wait for new data
         }
+        agents.retain(|a| !self.gone.contains(&a.pane));
         // the worker may have sorted with an older order (J/K just now)
         sort_agents(&mut agents, self.home.as_deref(), &self.order);
         self.all = agents;
@@ -886,6 +918,15 @@ impl Ui {
                         format!("run-shell -b {}", worktree::quote(&run))]);
     }
 
+    /// x: close the selected agent's pane (asks first). `prefix x` would
+    /// close the pane you are in, and that is the sidebar.
+    fn close_agent(&self) {
+        let (Some(a), client) = (self.agents.get(self.sel), self.client()) else { return };
+        let prompt = format!("{} {}? (y/n)", t().close_agent, a.label()).replace('#', "##");
+        tmux::tmux_bg(&["confirm-before".into(), "-t".into(), client, "-p".into(), prompt,
+                        format!("kill-pane -t {}", a.pane)]);
+    }
+
     fn handle_key(&mut self, k: Key) {
         if self.searching && self.search_key(k) {
             return;
@@ -935,6 +976,7 @@ impl Ui {
             Key::Char('N') => self.agent_new(),
             Key::Char('O') => self.worktree_menu(),
             Key::Char('D') => self.worktree_remove(),
+            Key::Char('x') => self.close_agent(),
             Key::Click(my) => {
                 let rows = self.rows.clone();
                 for (y0, y1, i) in rows {

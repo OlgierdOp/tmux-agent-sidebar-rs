@@ -39,7 +39,9 @@ pub fn ensure(window: &str) -> Option<String> {
     if sb.is_empty() {
         return None;
     }
-    tmux!["set-option", "-p", "-t", sb, "@agent_sidebar", "1"];
+    // the width is for the tmux hook that keeps it after a pane closes
+    tmux!["set-option", "-p", "-t", sb, "@agent_sidebar", "1", ";",
+          "set-option", "-g", "@agent_sidebar_width", SIDEBAR_WIDTH.to_string()];
     Some(sb)
 }
 
