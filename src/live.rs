@@ -33,8 +33,9 @@ pub fn live_status(state: &str) -> Option<&'static str> {
 }
 
 type Mtime = (i64, i64);
+type SessionCache = Mutex<HashMap<String, (Mtime, Option<Session>)>>;
 /// path -> (mtime, data)
-static SESSION_CACHE: LazyLock<Mutex<HashMap<String, (Mtime, Option<Session>)>>> =
+static SESSION_CACHE: LazyLock<SessionCache> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 /// background job id -> session file
 static JOB_FILES: LazyLock<Mutex<HashMap<String, String>>> =

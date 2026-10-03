@@ -94,11 +94,10 @@ pub fn list(dir: &str) -> Vec<(String, String)> {
             branch = b.trim_start_matches("refs/heads/").to_string();
         } else if line == "detached" {
             branch = "(detached)".into();
-        } else if line.is_empty() {
-            if let Some(p) = path.take() {
+        } else if line.is_empty()
+            && let Some(p) = path.take() {
                 items.push((p, std::mem::take(&mut branch)));
             }
-        }
     }
     items
 }
