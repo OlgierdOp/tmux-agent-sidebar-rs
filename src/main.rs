@@ -18,6 +18,7 @@ mod model;
 mod panes;
 mod procs;
 mod screen;
+mod sound;
 mod transcript;
 mod ui;
 
