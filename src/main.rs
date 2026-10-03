@@ -19,7 +19,6 @@ mod panes;
 mod procs;
 mod resume;
 mod screen;
-mod sound;
 mod transcript;
 mod ui;
 mod worktree;

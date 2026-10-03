@@ -1,6 +1,6 @@
 # Roadmap
 
-Done: search and state filters, resume after a tmux restart, worktrees from the sidebar, git status, optional sound.
+Done: search and state filters, resume after a tmux restart, worktrees from the sidebar, git status. Notifications and sounds are left to Claude Code.
 
 Ideas from [herdr](https://github.com/herdrdev/herdr):
 

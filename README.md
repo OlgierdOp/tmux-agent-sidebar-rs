@@ -153,13 +153,10 @@ Next to the branch: `↑n` commits ahead of the upstream, `↓n` behind, `●n` 
 | Sidebar width | `AGENT_SIDEBAR_WIDTH` environment variable | `42` |
 | Worktree directory | `set -g @agent_sidebar_worktree_dir DIR` | `<repo>/../<repo>-worktrees` |
 | Resume after restore | `set -g @agent_sidebar_resume off` | on |
-| Sound on waiting / done | `set -g @agent_sidebar_sound on`, files in `@agent_sidebar_sound_waiting` / `@agent_sidebar_sound_done` | off |
 | UI language | `LANG` and `STRINGS` in `src/config.rs` (only `en` for now) | `en` |
 | Key bindings | `agent-sidebar.tmux` | `prefix a`, `prefix Tab` |
 
 To choose a background color, press `c` in the sidebar until you like the color. The number shows in the top-right corner for 3 seconds. Write it into your tmux config to keep it after a tmux restart.
-
-The sound plays with `paplay`, `pw-play` or `aplay` (the first one found), only in the visible sidebar, and not for the agent you look at. The default files are freedesktop sounds. Claude Code can notify you itself, so the sound is off by default.
 
 ## How it works
 
@@ -206,7 +203,6 @@ The sound plays with `paplay`, `pw-play` or `aplay` (the first one found), only 
 | `src/git.rs` | Branch, worktree, ahead/behind and changes |
 | `src/worktree.rs` | `W` / `O` / `D`: add, open and remove worktrees |
 | `src/resume.rs` | State file and `resume` after a tmux-resurrect restore |
-| `src/sound.rs` | Optional sound on waiting / done |
 | `src/procs.rs` | Process tree (`/proc`) |
 | `src/panes.rs` | Sidebar panes, `jump` |
 | `src/tmux.rs` | tmux calls |

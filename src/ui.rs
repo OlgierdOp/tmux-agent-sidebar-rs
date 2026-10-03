@@ -94,12 +94,6 @@ pub struct Ui {
     query: String,
     /// the search line takes the keys
     searching: bool,
-    /// pane -> status at the last check, to find changes that play a sound
-    sound_prev: HashMap<String, String>,
-    /// @agent_sidebar_sound (off unless "on"), and the files for waiting and done
-    sound_on: bool,
-    sound_waiting: String,
-    sound_done: String,
     /// (y_start, y_end, index) for mouse clicks
     rows: Vec<(i64, i64, usize)>,
     /// session this pane is in
@@ -184,10 +178,6 @@ impl Ui {
             state_filter: None,
             query: String::new(),
             searching: false,
-            sound_prev: HashMap::new(),
-            sound_on: false,
-            sound_waiting: String::new(),
-            sound_done: String::new(),
             rows: Vec::new(),
             own: None,
             home: None,
@@ -280,24 +270,18 @@ impl Ui {
             "#{?window_active_clients,1,0}", "#{pane_width}",
             "#{@agent_sidebar_bg}", "#{P:#{?pane_active,#{pane_id},}}", "#{window_id}",
             "#{@agent_sidebar_focus}", "#{@agent_sidebar_order}", "#{@agent_sidebar_gen}",
-            "#{@agent_sidebar_sound}", "#{@agent_sidebar_sound_waiting}",
-            "#{@agent_sidebar_sound_done}",
         ];
         let out = tmux!["display-message", "-p", "-t", self.me, fields.join(SEP)];
         let out = out.trim_end_matches('\n');
         let parts: Vec<&str> = out.split(SEP).collect();
         let [on, sel, only, home, own, panes, visible, width, bg, active, window, focus, order,
-             generation, sound, sound_waiting, sound_done] = parts[..]
+             generation] = parts[..]
         else {
             return Poll::Exit;
         };
         if on != "1" {
             return Poll::Exit;
         }
-        self.sound_on = sound == "on";
-        let or = |v: &str, default: &str| if v.is_empty() { default.to_string() } else { v.to_string() };
-        self.sound_waiting = or(sound_waiting, crate::sound::DEFAULT_WAITING);
-        self.sound_done = or(sound_done, crate::sound::DEFAULT_DONE);
         self.window = window.to_string();
         if panes == "1" {
             return Poll::Exit; // alone in the window (the agent exited)
@@ -524,32 +508,6 @@ impl Ui {
             self.apply_filter(); // a status change can move an agent in or out of the filter
         }
         changed
-    }
-
-    /// Play a sound when an agent turns waiting (red) or done (green). Only the
-    /// visible sidebar plays, and not for the agent you look at.
-    fn sound_changes(&mut self) {
-        let mut play: Option<String> = None;
-        for a in &self.all {
-            let prev = self.sound_prev.insert(a.pane.clone(), a.status.clone());
-            let Some(prev) = prev else { continue }; // first sight: no sound
-            if prev == a.status || !self.visible || !self.sound_on {
-                continue;
-            }
-            let file = match a.status.as_str() {
-                "waiting" => &self.sound_waiting,
-                "done" => &self.sound_done,
-                _ => continue,
-            };
-            let seen = tmux!["display-message", "-p", "-t", a.pane,
-                             "#{&&:#{pane_active},#{window_active_clients}}"].trim() == "1";
-            if !seen && play.is_none() {
-                play = Some(file.clone());
-            }
-        }
-        if let Some(file) = play {
-            crate::sound::play(&file);
-        }
     }
 
     /// Green if you did not look at the agent when it finished. The Stop
@@ -1058,7 +1016,6 @@ impl Ui {
                 dirty = true;
             }
             dirty |= self.refresh_live();
-            self.sound_changes();
             // periodic redraw keeps the "working" spinner moving
             if dirty || (self.visible && self.last_draw.elapsed() >= Duration::from_millis(500)) {
                 self.sync_sel();
