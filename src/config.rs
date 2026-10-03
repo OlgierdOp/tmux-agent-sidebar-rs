@@ -40,9 +40,16 @@ const EN: Strings = Strings {
     outside_tmux: "agent_sidebar: run inside tmux",
 };
 
-/// UI strings for `LANG`. Only English for now.
+/// UI strings per language. Only English for now.
+const STRINGS: &[(&str, Strings)] = &[("en", EN)];
+
+/// UI strings for `LANG` (English when `LANG` has no entry).
 pub fn t() -> &'static Strings {
-    &EN
+    STRINGS
+        .iter()
+        .find(|(lang, _)| *lang == LANG)
+        .map(|(_, s)| s)
+        .unwrap_or(&STRINGS[0].1)
 }
 
 /// Main loop tick (new data, spinner). Keys wake it at once.
