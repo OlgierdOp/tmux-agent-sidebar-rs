@@ -33,6 +33,8 @@ enum Key {
     Down,
     Enter,
     Tab,
+    Esc,
+    Backspace,
     Click(i64),
     Other,
 }
@@ -81,7 +83,16 @@ pub struct Ui {
     me: String,
     sel: usize,
     scroll: i64,
+    /// all agents from the worker
+    all: Vec<Agent>,
+    /// the agents shown: `all` after the state filter and the search
     agents: Vec<Agent>,
+    /// state filter (w/d/b): only agents with this status
+    state_filter: Option<&'static str>,
+    /// search text (/): name, window, session, branch or path contains it
+    query: String,
+    /// the search line takes the keys
+    searching: bool,
     /// (y_start, y_end, index) for mouse clicks
     rows: Vec<(i64, i64, usize)>,
     /// session this pane is in
@@ -152,7 +163,11 @@ impl Ui {
             me: std::env::var("TMUX_PANE").unwrap_or_default(),
             sel: 0,
             scroll: 0,
+            all: Vec::new(),
             agents: Vec::new(),
+            state_filter: None,
+            query: String::new(),
+            searching: false,
             rows: Vec::new(),
             own: None,
             home: None,
@@ -270,7 +285,8 @@ impl Ui {
             order.split(ORDER_SEP).filter(|s| !s.is_empty()).map(str::to_string).collect();
         if order != self.order {
             self.order = order;
-            sort_agents(&mut self.agents, self.home.as_deref(), &self.order);
+            sort_agents(&mut self.all, self.home.as_deref(), &self.order);
+            self.apply_filter();
             self.wake.set();
             changed = true;
         }
@@ -313,7 +329,7 @@ impl Ui {
     /// sidebar) select an agent of this window, unless one is selected already.
     fn follow(&mut self, window: &str, active: &str, key: &str) {
         let mine: Vec<&str> = self
-            .agents
+            .all
             .iter()
             .filter(|a| a.window_id == window)
             .map(|a| a.pane.as_str())
@@ -359,16 +375,20 @@ impl Ui {
         if a.window_id == b.window_id {
             cmd = vec!["swap-pane".into(), "-d".into(), "-s".into(), a.pane.clone(), "-t".into(),
                        b.pane.clone()];
-            let (ia, ib) = (self.sel, j as usize);
-            self.agents[ia].order = b.order;
-            self.agents[ib].order = a.order;
+            for x in &mut self.all {
+                if x.pane == a.pane {
+                    x.order = b.order;
+                } else if x.pane == b.pane {
+                    x.order = a.order;
+                }
+            }
         } else {
             // -d and select-window: you keep looking at the same window
             cmd = vec!["swap-window".into(), "-d".into(), "-s".into(), a.window_id.clone(),
                        "-t".into(), b.window_id.clone(), ";".into(), "select-window".into(),
                        "-t".into(), self.window.clone()];
             let (wa, wb) = (a.order.0, b.order.0);
-            for x in &mut self.agents {
+            for x in &mut self.all {
                 if x.window_id == a.window_id {
                     x.order = (wb, x.order.1);
                 } else if x.window_id == b.window_id {
@@ -376,7 +396,8 @@ impl Ui {
                 }
             }
         }
-        sort_agents(&mut self.agents, self.home.as_deref(), &self.order);
+        sort_agents(&mut self.all, self.home.as_deref(), &self.order);
+        self.apply_filter();
         self.sync_sel(); // the selection stays on the same agent
         // the other sidebars collect the new order at once (@agent_sidebar_gen)
         let ns = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
@@ -417,8 +438,15 @@ impl Ui {
             return;
         }
         sessions.swap(i, j as usize);
+        // keep the sessions the filter hides now in the order too
+        for a in &self.all {
+            if !sessions.contains(&a.session) {
+                sessions.push(a.session.clone());
+            }
+        }
         self.order = sessions.clone();
-        sort_agents(&mut self.agents, self.home.as_deref(), &sessions);
+        sort_agents(&mut self.all, self.home.as_deref(), &sessions);
+        self.apply_filter();
         self.sync_sel(); // the selection stays on the same agent
         self.sync_shared();
         self.poke_others(vec!["set-option".into(), "-g".into(), "@agent_sidebar_order".into(),
@@ -437,12 +465,12 @@ impl Ui {
     fn refresh_live(&mut self) -> bool {
         let mut changed = false;
         let now = Instant::now();
-        for i in 0..self.agents.len() {
-            let Some(info) = self.agents[i].pid.and_then(session_info) else {
+        for i in 0..self.all.len() {
+            let Some(info) = self.all[i].pid.and_then(session_info) else {
                 continue;
             };
             let live = state(&info).to_string();
-            let pane = self.agents[i].pane.clone();
+            let pane = self.all[i].pane.clone();
             let prev = self.live_prev.insert(pane.clone(), live.clone());
             if live != "idle" {
                 self.finishing.remove(&pane);
@@ -453,18 +481,21 @@ impl Ui {
                 self.finishing.insert(pane.clone(), now + FINISH_WAIT);
             }
             if let Some(deadline) = self.finishing.get(&pane).copied() {
-                if transcript_info(self.agents[i].transcript.as_deref()).finished {
+                if transcript_info(self.all[i].transcript.as_deref()).finished {
                     self.finishing.remove(&pane);
                     self.mark_finished(i);
                 } else if now > deadline {
                     self.finishing.remove(&pane); // stopped by you: stays idle
                 }
             }
-            let new = resolve_status(&self.agents[i].hook, &live);
-            if new != self.agents[i].status {
-                self.agents[i].status = new.to_string();
+            let new = resolve_status(&self.all[i].hook, &live);
+            if new != self.all[i].status {
+                self.all[i].status = new.to_string();
                 changed = true;
             }
+        }
+        if changed {
+            self.apply_filter(); // a status change can move an agent in or out of the filter
         }
         changed
     }
@@ -472,11 +503,11 @@ impl Ui {
     /// Green if you did not look at the agent when it finished. The Stop
     /// hook does the same, but no hook runs for a background session.
     fn mark_finished(&mut self, i: usize) {
-        let pane = self.agents[i].pane.clone();
+        let pane = self.all[i].pane.clone();
         let seen = tmux!["display-message", "-p", "-t", pane,
                          "#{&&:#{pane_active},#{window_active_clients}}"].trim() == "1";
         let hook = if seen { "idle" } else { "done" };
-        self.agents[i].hook = hook.to_string();
+        self.all[i].hook = hook.to_string();
         let ts = (now_secs() as i64).to_string();
         tmux!["set-option", "-p", "-t", pane, "@agent_status", hook, ";",
               "set-option", "-p", "-t", pane, "@agent_ts", ts];
@@ -492,8 +523,63 @@ impl Ui {
         }
         // the worker may have sorted with an older order (J/K just now)
         sort_agents(&mut agents, self.home.as_deref(), &self.order);
-        self.agents = agents;
+        self.all = agents;
+        self.apply_filter();
         self.loaded = true;
+        true
+    }
+
+    // --- filter and search
+
+    fn matches(&self, a: &Agent) -> bool {
+        if self.state_filter.is_some_and(|st| a.status != st) {
+            return false;
+        }
+        if self.query.is_empty() {
+            return true;
+        }
+        let q = self.query.to_lowercase();
+        let git = a.git.as_ref();
+        [a.label(), &a.window, &a.session, &a.cwd,
+         git.map_or("", |g| g.branch.as_str()), git.map_or("", |g| g.top.as_str())]
+            .iter()
+            .any(|field| field.to_lowercase().contains(&q))
+    }
+
+    /// Rebuild the shown list from all agents.
+    fn apply_filter(&mut self) {
+        self.agents = self.all.iter().filter(|a| self.matches(a)).cloned().collect();
+    }
+
+    fn set_state_filter(&mut self, st: &'static str) {
+        self.state_filter = if self.state_filter == Some(st) { None } else { Some(st) };
+        self.scroll = 0;
+        self.apply_filter();
+    }
+
+    fn clear_filter(&mut self) {
+        self.state_filter = None;
+        self.query.clear();
+        self.searching = false;
+        self.apply_filter();
+    }
+
+    /// Keys while the search line is open. True when the key was used.
+    fn search_key(&mut self, k: Key) -> bool {
+        match k {
+            Key::Char(c) => self.query.push(c),
+            Key::Backspace => {
+                self.query.pop();
+            }
+            Key::Enter => self.searching = false, // keep the filter
+            Key::Esc => {
+                self.query.clear();
+                self.searching = false;
+            }
+            _ => return false, // arrows, Tab, clicks: normal handling
+        }
+        self.scroll = 0;
+        self.apply_filter();
         true
     }
 
@@ -542,7 +628,8 @@ impl Ui {
         let tx = t();
         self.put(0, 1, tx.title, Style::DEFAULT.bold());
         let mut x = len(tx.title) + 2;
-        let all: Vec<&Agent> = self.agents.iter().collect();
+        // the counts cover all agents, also the ones a filter hides
+        let all: Vec<&Agent> = self.all.iter().collect();
         for (label, col) in Self::counts_label(&all) {
             let st = self.style(col, false).bold();
             self.put(0, x, &label, st);
@@ -552,11 +639,23 @@ impl Ui {
             let label = format!("bg {}", self.bg.unwrap_or(SEL_BG));
             let st = self.style(Col::Text, true).bold();
             self.put(0, w - len(&label) - 2, &label, st);
-        } else if let (true, Some(home)) =
-            (self.only_home, self.home.clone().filter(|h| !h.is_empty()))
-        {
-            let st = self.style(Col::Cyan, false);
-            self.put(0, (x + 1).max(w - len(&home) - 4), &format!("[{home}]"), st);
+        } else {
+            // active filters: [home  state  /search]
+            let mut parts: Vec<String> = Vec::new();
+            if let (true, Some(home)) = (self.only_home, self.home.clone().filter(|h| !h.is_empty())) {
+                parts.push(home);
+            }
+            if let Some(st) = self.state_filter {
+                parts.push(tx.filter_name(st).to_string());
+            }
+            if !self.query.is_empty() && !self.searching {
+                parts.push(format!("/{}", self.query));
+            }
+            if !parts.is_empty() {
+                let label = format!("[{}]", parts.join(" "));
+                let st = self.style(Col::Cyan, false);
+                self.put(0, (x + 1).max(w - len(&label) - 2), &label, st);
+            }
         }
         let gray = self.style(Col::Gray, false);
         self.put(1, 0, &"─".repeat((w - 1).max(0) as usize), gray);
@@ -564,7 +663,8 @@ impl Ui {
         self.rows.clear();
         let (top, avail) = (2, (h - 3).max(1));
         if self.agents.is_empty() {
-            self.put(top, 1, tx.no_agents, gray);
+            let text = if self.all.is_empty() { tx.no_agents } else { tx.no_match };
+            self.put(top, 1, text, gray);
         }
         let items = self.layout();
         // scrolling: keep the selected agent (and its session header) in view
@@ -595,7 +695,12 @@ impl Ui {
                 }
             }
         }
-        self.put(h - 1, 1, tx.help, gray);
+        if self.searching {
+            let line = format!("/{}▏", self.query);
+            self.put(h - 1, 1, &line, Style::DEFAULT.bold());
+        } else {
+            self.put(h - 1, 1, tx.help, gray);
+        }
         let _ = self.screen.flush(&mut std::io::stdout().lock());
         let sel = self.agents.get(self.sel).map(|a| a.pane.clone()).unwrap_or_default();
         if Some(&sel) != self.drawn_sel.as_ref() {
@@ -646,7 +751,20 @@ impl Ui {
         match &a.git {
             Some(g) => {
                 let st = c(self, Col::Magenta);
-                self.put(y + 1, 3, &format!("⎇ {}", g.branch), st);
+                let branch = format!("⎇ {}", g.branch);
+                self.put(y + 1, 3, &branch, st);
+                // ahead / behind the upstream, changed files
+                let mut x = 3 + len(&branch) + 1;
+                let parts = [("↑", g.status.ahead, Col::Green), ("↓", g.status.behind, Col::Red),
+                             ("●", g.status.changes, Col::Yellow)];
+                for (sym, n, col) in parts {
+                    if n > 0 {
+                        let label = format!("{sym}{n}");
+                        let st = c(self, col);
+                        self.put(y + 1, x, &label, st);
+                        x += len(&label) + 1;
+                    }
+                }
                 let tag = if g.linked_worktree { " [wt]" } else { "" };
                 let path = git::short_path(&g.top, Some(w - 7 - len(tag)));
                 let icon = if g.linked_worktree { "⊕ " } else { "⌂ " };
@@ -670,6 +788,12 @@ impl Ui {
         if 0 <= i && (i as usize) < self.agents.len() {
             self.select(i);
             jump(&mut self.agents[i as usize], focus);
+            // jump marks a "done" agent as seen
+            let a = &self.agents[i as usize];
+            if let Some(x) = self.all.iter_mut().find(|x| x.pane == a.pane) {
+                x.status = a.status.clone();
+                x.hook = a.hook.clone();
+            }
         }
     }
 
@@ -691,6 +815,9 @@ impl Ui {
     }
 
     fn handle_key(&mut self, k: Key) {
+        if self.searching && self.search_key(k) {
+            return;
+        }
         let n = self.agents.len() as i64;
         match k {
             Key::Char('j') | Key::Down => self.select((self.sel as i64 + 1).min(n - 1)),
@@ -723,6 +850,15 @@ impl Ui {
                 git::clear_cache();
                 self.wake.set();
             }
+            Key::Char('/') => {
+                self.searching = true;
+                self.query.clear();
+                self.apply_filter();
+            }
+            Key::Char('w') => self.set_state_filter("waiting"),
+            Key::Char('d') => self.set_state_filter("done"),
+            Key::Char('b') => self.set_state_filter("working"),
+            Key::Char('a') | Key::Esc => self.clear_filter(),
             Key::Click(my) => {
                 let rows = self.rows.clone();
                 for (y0, y1, i) in rows {
@@ -755,6 +891,8 @@ impl Ui {
                     // Ctrl+J is a newline (10): curses treats it like Enter
                     KeyCode::Char('j') if k.modifiers == KeyModifiers::CONTROL => Key::Enter,
                     KeyCode::Tab => Key::Tab,
+                    KeyCode::Esc => Key::Esc,
+                    KeyCode::Backspace => Key::Backspace,
                     KeyCode::Char(c) if plain => Key::Char(c),
                     _ => Key::Other,
                 })

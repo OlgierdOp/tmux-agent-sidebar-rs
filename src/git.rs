@@ -13,17 +13,60 @@ pub struct GitInfo {
     pub top: String,
     pub branch: String,
     pub linked_worktree: bool,
+    pub status: GitStatus,
 }
 
-static CACHE: LazyLock<Mutex<HashMap<String, (Instant, Option<GitInfo>)>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+/// Commits ahead of / behind the upstream, and changed files (with untracked).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct GitStatus {
+    pub ahead: u32,
+    pub behind: u32,
+    pub changes: u32,
+}
+
+type Cache<T> = LazyLock<Mutex<HashMap<String, (Instant, T)>>>;
+
+/// path -> git info
+static CACHE: Cache<Option<GitInfo>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+/// repo top -> status, so agents in one repo share one `git status`
+static STATUS_CACHE: Cache<GitStatus> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
 pub fn clear_cache() {
     CACHE.lock().unwrap().clear();
+    STATUS_CACHE.lock().unwrap().clear();
+}
+
+/// Parse `git status --porcelain=v2 --branch`.
+fn parse_status(out: &str) -> GitStatus {
+    let mut st = GitStatus::default();
+    for line in out.lines() {
+        if let Some(ab) = line.strip_prefix("# branch.ab ") {
+            let mut it = ab.split_whitespace();
+            st.ahead = it.next().and_then(|a| a.trim_start_matches('+').parse().ok()).unwrap_or(0);
+            st.behind = it.next().and_then(|b| b.trim_start_matches('-').parse().ok()).unwrap_or(0);
+        } else if !line.starts_with('#') && !line.is_empty() {
+            st.changes += 1;
+        }
+    }
+    st
+}
+
+fn git_status(top: &str) -> GitStatus {
+    let now = Instant::now();
+    if let Some((at, st)) = STATUS_CACHE.lock().unwrap().get(top)
+        && now.duration_since(*at) < GIT_TTL
+    {
+        return *st;
+    }
+    let st = git(top, &["status", "--porcelain=v2", "--branch"])
+        .map(|out| parse_status(&out))
+        .unwrap_or_default();
+    STATUS_CACHE.lock().unwrap().insert(top.to_string(), (now, st));
+    st
 }
 
 /// `git -C path args...`: trimmed stdout, or None on error or after 2 s.
-fn git(path: &str, args: &[&str]) -> Option<String> {
+pub fn git(path: &str, args: &[&str]) -> Option<String> {
     let mut child = Command::new("git")
         .arg("-C")
         .arg(path)
@@ -79,6 +122,7 @@ pub fn git_info(path: &str) -> Option<GitInfo> {
                 top: top.to_string(),
                 branch,
                 linked_worktree: realpath(git_dir) != realpath(common),
+                status: git_status(top),
             });
         }
     }
@@ -107,4 +151,23 @@ pub fn short_path(p: &str, width: Option<i64>) -> String {
             p = format!("…{}", chars_from(&p, -(width - 1)));
         }
     p
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn status() {
+        let out = "# branch.oid abc\n# branch.head main\n# branch.upstream origin/main\n\
+                   # branch.ab +2 -1\n1 .M N... 100644 100644 100644 a b src/x.rs\n? new.txt\n";
+        assert_eq!(parse_status(out), GitStatus { ahead: 2, behind: 1, changes: 2 });
+        assert_eq!(parse_status("# branch.head main\n"), GitStatus::default());
+    }
+
+    #[test]
+    fn paths() {
+        assert_eq!(chars_from("abcdef", -3), "def");
+        assert_eq!(chars_from("abc", 0), "abc");
+    }
 }

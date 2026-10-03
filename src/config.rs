@@ -28,16 +28,31 @@ pub struct Strings {
     pub rename: &'static str,
     pub none_waiting: &'static str,
     pub outside_tmux: &'static str,
+    pub no_match: &'static str,
+    /// state filter labels: waiting, done, working
+    pub filters: [&'static str; 3],
+}
+
+impl Strings {
+    pub fn filter_name(&self, status: &str) -> &'static str {
+        match status {
+            "waiting" => self.filters[0],
+            "done" => self.filters[1],
+            _ => self.filters[2],
+        }
+    }
 }
 
 const EN: Strings = Strings {
     title: "AGENTS",
     no_agents: "No Claude Code agents",
     no_git: "(not a git repo)",
-    help: "⏎ show  i enter  s session  c color",
+    help: "⏎ show  / find  w d b a filter  c color",
     rename: "agent name:",
     none_waiting: "No agent is waiting",
     outside_tmux: "agent_sidebar: run inside tmux",
+    no_match: "No matching agents",
+    filters: ["waiting", "done", "busy"],
 };
 
 /// UI strings per language. Only English for now.
