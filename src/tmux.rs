@@ -1,0 +1,48 @@
+//! tmux commands.
+
+use std::process::{Command, Stdio};
+
+/// Run tmux and return its stdout ("" when tmux cannot run).
+pub fn tmux<S: AsRef<str>>(args: &[S]) -> String {
+    match Command::new("tmux")
+        .args(args.iter().map(|a| a.as_ref()))
+        .stdin(Stdio::null())
+        .output()
+    {
+        Ok(out) => String::from_utf8_lossy(&out.stdout).into_owned(),
+        Err(_) => String::new(),
+    }
+}
+
+/// Shorthand: `tmux!["set-option", "-g", name, value]`.
+#[macro_export]
+macro_rules! tmux {
+    ($($arg:expr),* $(,)?) => {
+        $crate::tmux::tmux(&[$(::std::convert::AsRef::<str>::as_ref(&$arg)),*])
+    };
+}
+
+/// A global tmux option.
+pub fn gopt(name: &str) -> String {
+    tmux!["show-option", "-gqv", name].trim().to_string()
+}
+
+pub fn current_session(pane: Option<&str>) -> String {
+    match pane {
+        Some(p) => tmux!["display-message", "-p", "-t", p, "#{session_name}"],
+        None => tmux!["display-message", "-p", "#{session_name}"],
+    }
+    .trim()
+    .to_string()
+}
+
+/// Sidebar panes (pane ids) of the whole server.
+pub fn sidebar_panes() -> Vec<String> {
+    tmux!["list-panes", "-a", "-F", "#{pane_id}\t#{@agent_sidebar}"]
+        .lines()
+        .filter_map(|line| {
+            let (pane, flag) = line.split_once('\t')?;
+            (flag == "1").then(|| pane.to_string())
+        })
+        .collect()
+}
