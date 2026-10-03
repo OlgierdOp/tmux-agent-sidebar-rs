@@ -96,7 +96,7 @@ pub struct Ui {
     searching: bool,
     /// pane -> status at the last check, to find changes that play a sound
     sound_prev: HashMap<String, String>,
-    /// @agent_sidebar_sound (on unless "off"), and the files for waiting and done
+    /// @agent_sidebar_sound (off unless "on"), and the files for waiting and done
     sound_on: bool,
     sound_waiting: String,
     sound_done: String,
@@ -185,7 +185,7 @@ impl Ui {
             query: String::new(),
             searching: false,
             sound_prev: HashMap::new(),
-            sound_on: true,
+            sound_on: false,
             sound_waiting: String::new(),
             sound_done: String::new(),
             rows: Vec::new(),
@@ -294,7 +294,7 @@ impl Ui {
         if on != "1" {
             return Poll::Exit;
         }
-        self.sound_on = sound != "off";
+        self.sound_on = sound == "on";
         let or = |v: &str, default: &str| if v.is_empty() { default.to_string() } else { v.to_string() };
         self.sound_waiting = or(sound_waiting, crate::sound::DEFAULT_WAITING);
         self.sound_done = or(sound_done, crate::sound::DEFAULT_DONE);
