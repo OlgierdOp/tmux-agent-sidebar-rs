@@ -40,6 +40,10 @@ fn list_panes() -> Vec<Pane> {
 #[derive(Clone, Debug)]
 pub struct Agent {
     pub pane: String,
+    /// `session:window.pane`, for the resume file
+    pub position: String,
+    /// Claude Code session id, for `claude --resume`
+    pub session_id: Option<String>,
     pub session: String,
     pub window_id: String,
     /// (window index, pane index)
@@ -73,10 +77,22 @@ fn basename(p: &str) -> &str {
 }
 
 pub fn collect_agents(home_session: Option<&str>, order: &[String]) -> Vec<Agent> {
+    collect(home_session, order).0
+}
+
+/// Position of a pane: `session:window.pane`.
+fn position(p: &Pane) -> String {
+    format!("{}:{}.{}", p["session_name"], p["window_index"], p["pane_index"])
+}
+
+/// The agents, and the positions of the sidebar panes.
+pub fn collect(home_session: Option<&str>, order: &[String]) -> (Vec<Agent>, Vec<String>) {
     let children = (!*HAS_CHILDREN_FILE).then(process_children);
     let mut agents = Vec::new();
+    let mut sidebars = Vec::new();
     for p in list_panes() {
         if !p["@agent_sidebar"].is_empty() {
+            sidebars.push(position(&p));
             continue;
         }
         let Ok(pane_pid) = p["pane_pid"].parse::<i64>() else { continue };
@@ -125,6 +141,15 @@ pub fn collect_agents(home_session: Option<&str>, order: &[String]) -> Vec<Agent
                 tmux!["set-option", "-p", "-t", pane, "@agent_status", status, ";",
                       "set-option", "-p", "-t", pane, "@agent_ts", t.to_string()];
             }
+        // the id that `claude --resume` takes (only while claude runs here)
+        let session_id = pid.and(
+            info.as_ref()
+                .and_then(|i| i.get("sessionId").and_then(Value::as_str).map(str::to_string))
+                .or_else(|| {
+                    let t = transcript.as_deref()?;
+                    Some(t.rsplit('/').next()?.strip_suffix(".jsonl")?.to_string())
+                }),
+        );
         let git = git_info(&cwd);
         let mut name = p["@agent_name"].clone();
         if name.is_empty() && p["automatic-rename"] == "1" {
@@ -141,6 +166,8 @@ pub fn collect_agents(home_session: Option<&str>, order: &[String]) -> Vec<Agent
         };
         agents.push(Agent {
             pane: p["pane_id"].clone(),
+            position: position(&p),
+            session_id,
             session: p["session_name"].clone(),
             window_id: p["window_id"].clone(),
             order: (wi, pi),
@@ -157,7 +184,7 @@ pub fn collect_agents(home_session: Option<&str>, order: &[String]) -> Vec<Agent
         });
     }
     sort_agents(&mut agents, home_session, order);
-    agents
+    (agents, sidebars)
 }
 
 /// Sessions in your order (J/K, `@agent_sidebar_order`). Sessions not in it

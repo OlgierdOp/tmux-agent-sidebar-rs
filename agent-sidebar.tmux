@@ -44,3 +44,8 @@ set-hook -g after-new-window[42] {
     run-shell -b "#{@agent_sidebar_dir}/target/release/agent-sidebar ensure #{window_id}"
   }
 }
+
+# tmux-resurrect: after a restore, start `claude --resume <id>` in the panes
+# that ran an agent and close the old sidebar panes. Turn it off with:
+#   set -g @agent_sidebar_resume off
+set -gF @resurrect-hook-post-restore-all "#{@agent_sidebar_dir}/target/release/agent-sidebar resume"

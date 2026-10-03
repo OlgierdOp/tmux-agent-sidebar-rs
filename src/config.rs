@@ -36,6 +36,7 @@ pub struct Strings {
     pub wt_removed: &'static str,
     pub wt_no_repo: &'static str,
     pub wt_not_linked: &'static str,
+    pub resumed: &'static str,
     /// state filter labels: waiting, done, working
     pub filters: [&'static str; 3],
 }
@@ -66,6 +67,7 @@ const EN: Strings = Strings {
     wt_removed: "worktree removed:",
     wt_no_repo: "worktree: not a git repo",
     wt_not_linked: "not a linked worktree",
+    resumed: "agent sidebar: resumed agents:",
     filters: ["waiting", "done", "busy"],
 };
 

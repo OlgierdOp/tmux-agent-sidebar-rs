@@ -17,6 +17,7 @@ mod live;
 mod model;
 mod panes;
 mod procs;
+mod resume;
 mod screen;
 mod sound;
 mod transcript;
@@ -34,6 +35,7 @@ fn cmd_toggle() {
         for pane in sidebar_panes() {
             tmux!["kill-pane", "-t", pane];
         }
+        resume::forget_sidebars();
         return;
     }
     tmux!["set-option", "-g", "@agent_sidebar_on", "1"];
@@ -92,6 +94,7 @@ fn main() {
             return;
         }
         Some("next") => return cmd_next(),
+        Some("resume") => return resume::cmd_resume(),
         Some(cmd @ ("worktree-new" | "worktree-open" | "worktree-remove")) => {
             let arg = |i: usize| args.get(i).map(String::as_str).unwrap_or("");
             match cmd {

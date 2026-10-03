@@ -13,7 +13,7 @@ use crate::config::{
 };
 use crate::git;
 use crate::live::{resolve_status, session_info, state};
-use crate::model::{collect_agents, sort_agents, Agent};
+use crate::model::{collect, sort_agents, Agent};
 use crate::panes::jump;
 use crate::screen::{Color, Screen, Style};
 use crate::tmux;
@@ -147,6 +147,7 @@ fn len(s: &str) -> i64 {
 }
 
 fn worker(shared: Arc<Mutex<Shared>>, wake: Arc<Wake>) {
+    let mut saved = String::new();
     loop {
         let visible = shared.lock().unwrap().visible;
         wake.wait_clear(if visible { REFRESH } else { HIDDEN_REFRESH });
@@ -154,7 +155,15 @@ fn worker(shared: Arc<Mutex<Shared>>, wake: Arc<Wake>) {
             let s = shared.lock().unwrap();
             (s.home.clone(), s.only_home, s.order.clone(), s.generation.clone())
         };
-        let mut agents = collect_agents(home.as_deref(), &order);
+        let (mut agents, sidebars) = collect(home.as_deref(), &order);
+        // the visible sidebar keeps the resume file up to date (written on change only)
+        if visible {
+            let snap = crate::resume::snapshot(&agents, &sidebars);
+            if snap != saved {
+                crate::resume::save(&snap);
+                saved = snap;
+            }
+        }
         if only {
             agents.retain(|a| Some(&a.session) == home.as_ref());
         }
