@@ -21,6 +21,7 @@ mod screen;
 mod sound;
 mod transcript;
 mod ui;
+mod worktree;
 
 use config::{status_def, t};
 use model::collect_agents;
@@ -91,6 +92,15 @@ fn main() {
             return;
         }
         Some("next") => return cmd_next(),
+        Some(cmd @ ("worktree-new" | "worktree-open" | "worktree-remove")) => {
+            let arg = |i: usize| args.get(i).map(String::as_str).unwrap_or("");
+            match cmd {
+                "worktree-new" => worktree::cmd_new(arg(1), arg(2)),
+                "worktree-open" => worktree::cmd_open(arg(1), arg(2), arg(3)),
+                _ => worktree::cmd_remove(arg(1), arg(2), arg(3), arg(4) == "--force"),
+            }
+            return;
+        }
         _ => {}
     }
     let set = |v: &str| std::env::var(v).is_ok_and(|s| !s.is_empty());

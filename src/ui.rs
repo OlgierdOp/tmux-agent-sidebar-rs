@@ -19,6 +19,7 @@ use crate::screen::{Color, Screen, Style};
 use crate::tmux;
 use crate::tmux::sidebar_panes;
 use crate::transcript::{fmt_tokens, transcript_info};
+use crate::worktree;
 
 /// Lines of one agent: name, branch, worktree (+ separator).
 const LINES_PER_AGENT: i64 = 3;
@@ -852,8 +853,64 @@ impl Ui {
 
     fn rename(&self) {
         let Some(a) = self.agents.get(self.sel) else { return };
-        tmux!["command-prompt", "-I", a.label(), "-p", t().rename,
-              format!("set-option -p -t {} @agent_name '%%'", a.pane)];
+        tmux::tmux_bg(&["command-prompt".into(), "-I".into(), a.label().to_string(), "-p".into(),
+                        t().rename.to_string(),
+                        format!("set-option -p -t {} @agent_name '%%'", a.pane)]);
+    }
+
+    /// The client that shows this sidebar's window (prompts and menus go there).
+    fn client(&self) -> String {
+        tmux!["list-clients", "-F", "#{client_name} #{window_id}"]
+            .lines()
+            .filter_map(|l| l.split_once(' '))
+            .find(|(_, w)| *w == self.window)
+            .map(|(c, _)| c.to_string())
+            .unwrap_or_default()
+    }
+
+    /// W: ask for a branch, add a worktree for it, start claude there.
+    fn worktree_new(&self) {
+        let (Some(a), client) = (self.agents.get(self.sel), self.client()) else { return };
+        if a.git.is_none() {
+            return;
+        }
+        let run = worktree::self_cmd(&["worktree-new", &client, &a.pane]);
+        let template = format!("set-option -g {} \"%%%\" ; run-shell -b {}",
+                               worktree::INPUT_OPT, worktree::quote(&run));
+        tmux::tmux_bg(&["command-prompt", "-t", &client, "-p", t().wt_branch, &template]);
+    }
+
+    /// O: menu of the repo's worktrees. A worktree with an agent shows it,
+    /// one without gets a new window with claude.
+    fn worktree_menu(&self) {
+        let (Some(a), client) = (self.agents.get(self.sel), self.client()) else { return };
+        let items = worktree::list(&a.cwd);
+        if items.is_empty() {
+            return;
+        }
+        let mut args: Vec<String> = vec!["display-menu".into(), "-c".into(), client.clone(),
+                                         "-T".into(), t().wt_menu.into(), "-x".into(), "P".into(),
+                                         "-y".into(), "P".into()];
+        for (i, (path, branch)) in items.iter().enumerate() {
+            let key = if i < 9 { (i + 1).to_string() } else { String::new() };
+            let label = format!("{branch}  {}", git::short_path(path, None)).replace('#', "##");
+            let run = worktree::self_cmd(&["worktree-open", &client, &a.pane, path]);
+            args.extend([label, key, format!("run-shell -b {}", worktree::quote(&run))]);
+        }
+        tmux::tmux_bg(&args);
+    }
+
+    /// D: remove the linked worktree of the selected agent (asks first).
+    fn worktree_remove(&self) {
+        let (Some(a), client) = (self.agents.get(self.sel), self.client()) else { return };
+        let Some(g) = a.git.as_ref().filter(|g| g.linked_worktree) else {
+            tmux!["display-message", "-c", client, t().wt_not_linked];
+            return;
+        };
+        let run = worktree::self_cmd(&["worktree-remove", &client, &a.pane, &g.top]);
+        let prompt = format!("{} {} (y/n)", t().wt_remove, git::short_path(&g.top, None));
+        tmux::tmux_bg(&["confirm-before".into(), "-t".into(), client, "-p".into(), prompt,
+                        format!("run-shell -b {}", worktree::quote(&run))]);
     }
 
     fn handle_key(&mut self, k: Key) {
@@ -901,6 +958,9 @@ impl Ui {
             Key::Char('d') => self.set_state_filter("done"),
             Key::Char('b') => self.set_state_filter("working"),
             Key::Char('a') | Key::Esc => self.clear_filter(),
+            Key::Char('W') => self.worktree_new(),
+            Key::Char('O') => self.worktree_menu(),
+            Key::Char('D') => self.worktree_remove(),
             Key::Click(my) => {
                 let rows = self.rows.clone();
                 for (y0, y1, i) in rows {

@@ -14,6 +14,23 @@ pub fn tmux<S: AsRef<str>>(args: &[S]) -> String {
     }
 }
 
+/// Run tmux without waiting for it. For `command-prompt`, `display-menu` and
+/// `confirm-before`: they return only when you close the prompt, and the
+/// sidebar must not freeze meanwhile.
+pub fn tmux_bg<S: AsRef<str>>(args: &[S]) {
+    let child = Command::new("tmux")
+        .args(args.iter().map(|a| a.as_ref()))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
+    if let Ok(mut child) = child {
+        std::thread::spawn(move || {
+            let _ = child.wait(); // reap it
+        });
+    }
+}
+
 /// Shorthand: `tmux!["set-option", "-g", name, value]`.
 #[macro_export]
 macro_rules! tmux {

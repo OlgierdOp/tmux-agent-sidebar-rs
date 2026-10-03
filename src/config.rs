@@ -29,6 +29,13 @@ pub struct Strings {
     pub none_waiting: &'static str,
     pub outside_tmux: &'static str,
     pub no_match: &'static str,
+    pub wt_branch: &'static str,
+    pub wt_menu: &'static str,
+    pub wt_remove: &'static str,
+    pub wt_force: &'static str,
+    pub wt_removed: &'static str,
+    pub wt_no_repo: &'static str,
+    pub wt_not_linked: &'static str,
     /// state filter labels: waiting, done, working
     pub filters: [&'static str; 3],
 }
@@ -52,6 +59,13 @@ const EN: Strings = Strings {
     none_waiting: "No agent is waiting",
     outside_tmux: "agent_sidebar: run inside tmux",
     no_match: "No matching agents",
+    wt_branch: "worktree branch:",
+    wt_menu: "worktrees",
+    wt_remove: "remove worktree and close its agent?",
+    wt_force: "worktree has changes. remove anyway? (y/n)",
+    wt_removed: "worktree removed:",
+    wt_no_repo: "worktree: not a git repo",
+    wt_not_linked: "not a linked worktree",
     filters: ["waiting", "done", "busy"],
 };
 
