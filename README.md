@@ -75,6 +75,7 @@ Before it changes a file, the script makes a backup (`*.bak.<timestamp>`). You c
 |--------------|--------|
 | `prefix a`   | Show/hide the sidebar in all windows |
 | `prefix Tab` | Go into the agent that waits for you (red first, then green, current session first) |
+| `Ctrl+a`     | Go into the sidebar of the current window, from any pane (no prefix). Turns the sidebar on when it is off. |
 
 Keys in the sidebar:
 
@@ -95,6 +96,7 @@ Keys in the sidebar:
 | `W`             | New git worktree: asks for a branch, starts claude in it in a new window |
 | `O`             | Menu of the repo's worktrees: show its agent, or start one |
 | `D`             | Remove the selected agent's linked worktree (asks first) |
+| `x`             | Close the selected agent's pane (asks first). `prefix x` closes the pane you are in: in the sidebar, the sidebar itself. |
 | `n`             | Give the agent a name |
 | `c`             | Next selection background color (live preview) |
 | `r`             | Refresh git data |
@@ -173,7 +175,7 @@ Next to the branch: `↑n` commits ahead of the upstream, `↓n` behind, `●n` 
 | Worktree directory | `set -g @agent_sidebar_worktree_dir DIR` | `<repo>/../<repo>-worktrees` |
 | Resume after restore | `set -g @agent_sidebar_resume off` | on |
 | UI language | `LANG` and `STRINGS` in `src/config.rs` (only `en` for now) | `en` |
-| Key bindings | `agent-sidebar.tmux` | `prefix a`, `prefix Tab` |
+| Key bindings | `agent-sidebar.tmux` | `prefix a`, `prefix Tab`, `Ctrl+a` |
 
 To choose a background color, press `c` in the sidebar until you like the color. The number shows in the top-right corner for 3 seconds. Write it into your tmux config to keep it after a tmux restart.
 
@@ -187,12 +189,19 @@ To choose a background color, press `c` in the sidebar until you like the color.
   - `@agent_sidebar_bg`
   - `@agent_sidebar_order`
   - `@agent_sidebar_gen` (changes when `J`/`K` swaps windows, so the other sidebars collect the data again)
+  - `@agent_sidebar_width` (the sidebar width, for the tmux hooks)
 - **Fast selection sync.** A selection change sends `F12` to the other sidebar panes, so they redraw at once. `Enter` waits (max ~150 ms) until the target window's sidebar has drawn the new selection, then it switches the window.
 - **Window, session and pane switches.** The tmux hooks `session-window-changed`, `client-session-changed`, `after-select-pane` and `after-new-window` do two things:
   - they add a sidebar to a window on the first visit,
   - they send `F12` to the sidebar of the window you switch to, so it redraws at once (a few ms).
 
   tmux evaluates the conditions itself, and `run-shell -C` runs a tmux command, so a normal switch starts no process.
+- **Closing panes.** When a pane closes (it exits, `kill-pane`, `kill-window`), the hooks `window-layout-changed`, `pane-exited`, `after-kill-pane` and `window-unlinked` do this in tmux, before tmux draws:
+  - a window with only the sidebar left closes,
+  - a sidebar that got the closed pane's space shrinks back to its width,
+  - the visible sidebars get `F12`. Each sidebar compares the list of all tmux pane ids with the last one, so the closed agent leaves the list at once (a few ms), without waiting for the worker.
+
+  tmux evaluates these hooks in the current window, not in the changed one, so the formats (`@agent_sidebar_close`, `@agent_sidebar_fit`, `@agent_sidebar_poke`) loop over the windows and build the commands. No process starts.
 - **Reliable selection follow.** The visible sidebar compares the current window and active pane with the last pair it handled (`@agent_sidebar_focus`). It compares states, not events, so fast switching cannot make it miss a change. Visibility comes from `window_active_clients`, because tmux updates `session_attached` lazily.
 - **Non-blocking UI.** A worker thread collects the agent data (process tree, git, tokens). The main loop only handles keys, `F12` and drawing, so it never waits for the data. Prompts, menus and confirmations (`command-prompt`, `display-menu`, `confirm-before`) run in the background, because tmux returns from them only when you close them. The worktree work runs in `agent-sidebar worktree-*` commands that tmux starts.
 - **Drawing.** `src/screen.rs` keeps a cell buffer and writes only the cells that changed, with the same color codes that curses writes for `tmux-256color`.
@@ -213,7 +222,7 @@ To choose a background color, press `c` in the sidebar until you like the color.
 
 | File | Purpose |
 |------|---------|
-| `src/main.rs` | Commands (`toggle`, `ensure`, `next`, `resume`, `spawn`, `prompt`, `list`, `wait`, `read`, `worktree-*`, `agent-new`) and the TUI entry |
+| `src/main.rs` | Commands (`toggle`, `ensure`, `focus`, `next`, `resume`, `spawn`, `prompt`, `list`, `wait`, `read`, `worktree-*`, `agent-new`) and the TUI entry |
 | `src/agents.rs` | `spawn`, `prompt`, `list`, `wait`, `read`: start and drive agents |
 | `src/ui.rs` | Sidebar TUI: keys, worker thread, follow, filters, J/K, colors |
 | `src/screen.rs` | Cell buffer that writes only changed cells (like curses) |
@@ -237,7 +246,7 @@ To choose a background color, press `c` in the sidebar until you like the color.
 
 1. Remove the `source-file .../agent-sidebar.tmux` line from `~/.tmux.conf`, and the links `~/.local/bin/agent-sidebar` and `~/.claude/skills/tmux-agents`.
 2. Remove the `claude-hook.sh` entries from `~/.claude/settings.json`.
-3. Restart tmux, or unbind `prefix a` / `prefix Tab`, remove the `[42]` hooks and `@resurrect-hook-post-restore-all` by hand.
+3. Restart tmux, or unbind `prefix a` / `prefix Tab` / `Ctrl+a` (`unbind -n C-a`), remove the `[42]` hooks and `@resurrect-hook-post-restore-all` by hand.
 
 ## License
 

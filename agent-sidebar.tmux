@@ -11,6 +11,20 @@ bind-key a run-shell -b "#{@agent_sidebar_dir}/target/release/agent-sidebar togg
 # prefix + Tab -> go to the agent that is waiting (red first, then green)
 bind-key Tab run-shell -b "#{@agent_sidebar_dir}/target/release/agent-sidebar next"
 
+# Ctrl+a (no prefix) -> go into the sidebar of this window, from any pane.
+# Turns the sidebar on when it is off. A normal press starts no process.
+bind-key -n C-a {
+  if -F "#{@agent_sidebar_on}" {
+    if -F "#{==:#{P:#{?#{@agent_sidebar},x,}},}" {
+      run-shell -b "#{@agent_sidebar_dir}/target/release/agent-sidebar focus #{window_id}"
+    } {
+      run-shell -C "select-pane -t #{P:#{?#{@agent_sidebar},#{pane_id},}}"
+    }
+  } {
+    run-shell -b "#{@agent_sidebar_dir}/target/release/agent-sidebar toggle"
+  }
+}
+
 # On a window, session or pane switch:
 # - a window without a sidebar (new, or from another session) gets one,
 # - a window with a sidebar gets F12, so the sidebar redraws at once.
@@ -43,6 +57,31 @@ set-hook -g after-new-window[42] {
   if -F "#{&&:#{@agent_sidebar_on},#{==:#{P:#{?#{@agent_sidebar},x,}},}}" {
     run-shell -b "#{@agent_sidebar_dir}/target/release/agent-sidebar ensure #{window_id}"
   }
+}
+
+# When a pane closes:
+# - a window with only the sidebar left closes,
+# - a sidebar that got the closed pane's space shrinks back before tmux draws,
+# - the visible sidebars get F12, so the closed agent leaves the list at once.
+# tmux evaluates these hooks in the current window, not in the changed one,
+# so the formats loop over the windows (#{W:}, #{S:#{W:}}) and build the
+# commands (only for a window with one sidebar). No process starts.
+set -g @agent_sidebar_close "#{W:#{?#{&&:#{==:#{window_panes},1},#{@agent_sidebar}},kill-pane -t #{pane_id} ;,}}"
+set -g @agent_sidebar_fit "#{S:#{W:#{?#{&&:#{!=:#{window_panes},1},#{&&:#{!=:#{window_zoomed_flag},1},#{&&:#{==:#{P:#{?#{@agent_sidebar},x,}},x},#{!=:#{P:#{?#{@agent_sidebar},#{pane_width},}},#{@agent_sidebar_width}}}}},resize-pane -t #{P:#{?#{@agent_sidebar},#{pane_id},}} -x #{@agent_sidebar_width} ;,}}}"
+set -g @agent_sidebar_poke "#{S:#{W:#{?#{&&:#{window_active_clients},#{!=:#{window_panes},1}},#{P:#{?#{@agent_sidebar},send-keys -t #{pane_id} F12 ;,}},}}}"
+set-hook -g window-layout-changed[42] {
+  if -F "#{&&:#{@agent_sidebar_on},#{@agent_sidebar_width}}" {
+    run-shell -C "#{E:@agent_sidebar_close} #{E:@agent_sidebar_fit}"
+  }
+}
+set-hook -g pane-exited[42] {
+  if -F "#{@agent_sidebar_on}" { run-shell -C "#{E:@agent_sidebar_poke}" }
+}
+set-hook -g after-kill-pane[42] {
+  if -F "#{@agent_sidebar_on}" { run-shell -C "#{E:@agent_sidebar_poke}" }
+}
+set-hook -g window-unlinked[42] {
+  if -F "#{@agent_sidebar_on}" { run-shell -C "#{E:@agent_sidebar_poke}" }
 }
 
 # tmux-resurrect: after a restore, start `claude --resume <id>` in the panes
