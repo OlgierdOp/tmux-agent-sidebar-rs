@@ -11,6 +11,7 @@
 
 #[macro_use]
 mod tmux;
+mod agents;
 mod config;
 mod git;
 mod live;
@@ -94,10 +95,21 @@ fn main() {
         }
         Some("next") => return cmd_next(),
         Some("resume") => return resume::cmd_resume(),
-        Some(cmd @ ("worktree-new" | "worktree-open" | "worktree-remove")) => {
+        Some(cmd @ ("spawn" | "prompt" | "list" | "wait" | "read")) => {
+            let rest = &args[1..];
+            std::process::exit(match cmd {
+                "spawn" => agents::cmd_spawn(rest),
+                "prompt" => agents::cmd_prompt(rest),
+                "list" => agents::cmd_list(rest),
+                "wait" => agents::cmd_wait(rest),
+                _ => agents::cmd_read(rest),
+            });
+        }
+        Some(cmd @ ("worktree-new" | "worktree-open" | "worktree-remove" | "agent-new")) => {
             let arg = |i: usize| args.get(i).map(String::as_str).unwrap_or("");
             match cmd {
                 "worktree-new" => worktree::cmd_new(arg(1), arg(2)),
+                "agent-new" => worktree::cmd_agent_new(arg(1), arg(2)),
                 "worktree-open" => worktree::cmd_open(arg(1), arg(2), arg(3)),
                 _ => worktree::cmd_remove(arg(1), arg(2), arg(3), arg(4) == "--force"),
             }

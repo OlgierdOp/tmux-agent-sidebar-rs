@@ -46,7 +46,7 @@ pub fn quote(s: &str) -> String {
 }
 
 /// Quote a value for `sh` inside a tmux string: single quotes.
-fn sh_quote(s: &str) -> String {
+pub fn sh_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
@@ -102,6 +102,55 @@ pub fn list(dir: &str) -> Vec<(String, String)> {
     items
 }
 
+/// Add a worktree for `branch` to the repo of `main` and return its path.
+/// An existing local branch is checked out, otherwise it is created from HEAD.
+/// A branch that already has a worktree returns that worktree.
+pub fn add(main: &str, branch: &str) -> Result<String, String> {
+    if let Some((path, _)) = list(main).into_iter().find(|(_, b)| b == branch) {
+        return Ok(path);
+    }
+    let repo = Path::new(main).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let slug = branch.replace('/', "-");
+    let base = match gopt("@agent_sidebar_worktree_dir") {
+        dir if dir.is_empty() => {
+            let parent = Path::new(main).parent().map(|p| p.to_string_lossy().into_owned());
+            format!("{}/{repo}-worktrees", parent.unwrap_or_default())
+        }
+        dir => format!("{}/{repo}", dir.replacen('~', &std::env::var("HOME").unwrap_or_default(), 1)),
+    };
+    let path = format!("{base}/{slug}");
+    let exists = git(main, &["show-ref", "--verify", "--quiet", &format!("refs/heads/{branch}")]).0;
+    let (ok, _, err) = if exists {
+        git(main, &["worktree", "add", &path, branch])
+    } else {
+        git(main, &["worktree", "add", "-b", branch, &path])
+    };
+    if ok {
+        Ok(path)
+    } else {
+        Err(format!("worktree: {}", err.lines().last().unwrap_or("git failed")))
+    }
+}
+
+/// Type the command that starts claude into a new pane's shell:
+/// `claude -n <name> "<first prompt>"`. The prompt goes through a file, so
+/// quotes and newlines in it are safe.
+pub fn start_claude(pane: &str, name: Option<&str>, prompt: Option<&str>) {
+    let mut cmd = String::from("claude");
+    if let Some(name) = name {
+        cmd.push_str(&format!(" -n {}", sh_quote(name)));
+    }
+    if let Some(prompt) = prompt.filter(|p| !p.trim().is_empty()) {
+        let dir = crate::resume::state_file().with_file_name("prompts");
+        let file = dir.join(format!("{}.txt", pane.trim_start_matches('%')));
+        if std::fs::create_dir_all(&dir).is_ok() && std::fs::write(&file, prompt).is_ok() {
+            cmd.push_str(&format!(" \"$(cat {})\"", sh_quote(&file.to_string_lossy())));
+        }
+    }
+    tmux!["send-keys", "-t", pane, "-l", cmd];
+    tmux!["send-keys", "-t", pane, "Enter"];
+}
+
 /// Window after which new agent windows go: the window of `pane`.
 fn window_of(pane: &str) -> String {
     tmux!["display-message", "-p", "-t", pane, "#{window_id}"].trim().to_string()
@@ -116,8 +165,7 @@ fn open_agent_window(client: &str, after: &str, dir: &str) {
         message(client, "worktree: tmux could not open a window");
         return;
     };
-    tmux!["send-keys", "-t", pane, "-l", "claude"];
-    tmux!["send-keys", "-t", pane, "Enter"];
+    start_claude(pane, None, None);
     tmux!["set-option", "-g", "@agent_sidebar_sel", pane];
     ensure(window);
     tmux!["select-window", "-t", window];
@@ -151,27 +199,18 @@ pub fn cmd_new(client: &str, pane: &str) {
         message(client, t().wt_no_repo);
         return;
     };
-    let repo = Path::new(&main).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    let slug = branch.replace('/', "-");
-    let base = match gopt("@agent_sidebar_worktree_dir") {
-        dir if dir.is_empty() => {
-            let parent = Path::new(&main).parent().map(|p| p.to_string_lossy().into_owned());
-            format!("{}/{repo}-worktrees", parent.unwrap_or_default())
-        }
-        dir => format!("{}/{repo}", dir.replacen('~', &std::env::var("HOME").unwrap_or_default(), 1)),
-    };
-    let path = format!("{base}/{slug}");
-    let exists = git(&main, &["show-ref", "--verify", "--quiet", &format!("refs/heads/{branch}")]).0;
-    let (ok, _, err) = if exists {
-        git(&main, &["worktree", "add", &path, &branch])
-    } else {
-        git(&main, &["worktree", "add", "-b", &branch, &path])
-    };
-    if !ok {
-        message(client, &format!("worktree: {}", err.lines().last().unwrap_or("git failed")));
-        return;
+    match add(&main, &branch) {
+        Ok(path) => open_agent_window(client, &window_of(pane), &path),
+        Err(err) => message(client, &err),
     }
-    open_agent_window(client, &window_of(pane), &path);
+}
+
+/// `agent-new <client> <pane>`: a new agent in the repo (or directory) of
+/// the agent in `pane`, in a new window after it. No worktree.
+pub fn cmd_agent_new(client: &str, pane: &str) {
+    let cwd = tmux!["display-message", "-p", "-t", pane, "#{pane_current_path}"].trim().to_string();
+    let dir = crate::git::git_info(&cwd).map(|g| g.top).unwrap_or(cwd);
+    open_agent_window(client, &window_of(pane), &dir);
 }
 
 /// `worktree-open <client> <pane> <path>`: show the agent in the worktree,

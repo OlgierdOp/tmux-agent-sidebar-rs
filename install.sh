@@ -38,6 +38,12 @@ jq --arg cmd "$HOOK" '
 ' "$SETTINGS" > "$tmp" && mv "$tmp" "$SETTINGS"
 echo "✓ hooks in $SETTINGS"
 
+# --- the binary in PATH and the skill, so agents can start other agents
+mkdir -p "$HOME/.local/bin" "$HOME/.claude/skills"
+ln -sfn "$BIN" "$HOME/.local/bin/agent-sidebar"
+ln -sfn "$DIR/skills/tmux-agents" "$HOME/.claude/skills/tmux-agents"
+echo "✓ ~/.local/bin/agent-sidebar and the tmux-agents skill"
+
 # --- ~/.tmux.conf: replace the Python version's line, or add ours
 touch "$TMUX_CONF"
 if ! grep -qxF "$LINE" "$TMUX_CONF"; then

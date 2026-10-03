@@ -835,6 +835,12 @@ impl Ui {
             .unwrap_or_default()
     }
 
+    /// N: a new agent in the selected agent's repo, in a new window (no worktree).
+    fn agent_new(&self) {
+        let (Some(a), client) = (self.agents.get(self.sel), self.client()) else { return };
+        tmux::tmux_bg(&["run-shell", "-b", &worktree::self_cmd(&["agent-new", &client, &a.pane])]);
+    }
+
     /// W: ask for a branch, add a worktree for it, start claude there.
     fn worktree_new(&self) {
         let (Some(a), client) = (self.agents.get(self.sel), self.client()) else { return };
@@ -926,6 +932,7 @@ impl Ui {
             Key::Char('b') => self.set_state_filter("working"),
             Key::Char('a') | Key::Esc => self.clear_filter(),
             Key::Char('W') => self.worktree_new(),
+            Key::Char('N') => self.agent_new(),
             Key::Char('O') => self.worktree_menu(),
             Key::Char('D') => self.worktree_remove(),
             Key::Click(my) => {

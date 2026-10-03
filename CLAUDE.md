@@ -11,7 +11,8 @@ tmux agent sidebar (Rust): a tmux sidebar that lists the Claude Code agents runn
   - the status table (`status_def` in `src/config.rs`),
   - the configuration table (every `@agent_sidebar_*` option the code reads),
   - "How it works",
-  - the "Files" table.
+  - the "Files" table,
+  - `skills/tmux-agents/SKILL.md` when the `spawn` / `prompt` / `list` / `wait` / `read` commands change.
 - Write all code, comments, UI strings, docs and commit messages in English.
 - Put UI strings in `Strings` / `STRINGS` in `src/config.rs`. Do not hard-code user-visible text.
 - Keep dependencies few (now: crossterm, serde_json, unicode-width). Ask before you add one.
@@ -36,7 +37,7 @@ export TMUX="$(tmux -L agtest display -p '#{socket_path}'),1,0"
 ```
 
 - Pass `-f /dev/null` on every tmux call: a call that starts a server must never read `~/.tmux.conf`. `kill-server` returns before the server is gone, so wait until `tmux -L agtest ls` fails before you start a new one.
-- A copy of `sleep` named `claude` works as a fake agent process. Put a fake `claude` command first in `PATH` when a test makes the sidebar type `claude` (worktrees, resume), so the real Claude Code never starts.
+- A copy of `sleep` named `claude` works as a fake agent process. Put a fake `claude` command first in `PATH` when a test makes the sidebar type `claude` (worktrees, resume, `spawn`), and set `tmux set -g default-command "bash --norc --noprofile"`: the user's `~/.bashrc` puts `~/.local/bin` (the real `claude`) first in `PATH` again.
 - Point `CLAUDE_CONFIG_DIR` and `XDG_STATE_HOME` to test directories (`tmux set-environment -g ...`) to fake session files and the resume state.
 - Create a new directory for each test run (`mktemp -d`). Do not use `rm -rf`.
 - To fake hook events, pipe JSON into the hook with `TMUX_PANE` set:

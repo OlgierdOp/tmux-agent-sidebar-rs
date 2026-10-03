@@ -7,7 +7,7 @@ A sidebar for tmux that lists every [Claude Code](https://claude.com/claude-code
 - the worktree (linked git worktrees are marked),
 - the context size in tokens.
 
-You can move between agents with `j`/`k` and show an agent's window with `Enter`. The cursor stays in the sidebar while you do this. You can search and filter the list, add and remove git worktrees, and the agents come back after a tmux restart.
+You can move between agents with `j`/`k` and show an agent's window with `Enter`. The cursor stays in the sidebar while you do this. You can search and filter the list, add and remove git worktrees, and the agents come back after a tmux restart. An agent can start other agents in their own worktrees and give them tasks.
 
 This is the Rust version. It started as a 1:1 port of the [Python version](https://github.com/OlgierdOp/tmux-agent-sidebar), which is no longer developed.
 
@@ -53,7 +53,8 @@ cd tmux-agent-sidebar-rs
 1. builds `target/release/agent-sidebar` (`cargo build --release`),
 2. adds `hooks/claude-hook.sh` to the hooks in `~/.claude/settings.json` and removes the hook of the Python version,
 3. adds `source-file .../agent-sidebar.tmux` to `~/.tmux.conf`, in place of the Python version's line, or before the TPM init line,
-4. in a running tmux: turns off the running sidebars, reloads the config and turns the sidebar on.
+4. links the binary as `~/.local/bin/agent-sidebar` and the skill `skills/tmux-agents` into `~/.claude/skills/`, so Claude Code agents can start other agents,
+5. in a running tmux: turns off the running sidebars, reloads the config and turns the sidebar on.
 
 Before it changes a file, the script makes a backup (`*.bak.<timestamp>`). You can run it more than once. An error elsewhere in `~/.tmux.conf` does not stop it. Running Claude Code sessions pick up the new hooks on their next event.
 
@@ -90,6 +91,7 @@ Keys in the sidebar:
 | `w` / `d` / `b` | Show only waiting / done / busy agents (press again to turn off) |
 | `a` / `Esc`     | Show all agents (clears the search and the state filter) |
 | `s`             | Show only the home session / all sessions |
+| `N`             | New agent in the selected agent's repo, in a new window (no worktree) |
 | `W`             | New git worktree: asks for a branch, starts claude in it in a new window |
 | `O`             | Menu of the repo's worktrees: show its agent, or start one |
 | `D`             | Remove the selected agent's linked worktree (asks first) |
@@ -122,6 +124,23 @@ The agent numbers (`1`–`9`) always follow the order in the list.
 - `W` asks for a branch name. An existing local branch is checked out, otherwise the branch is created from `HEAD`. The worktree goes to `<repo>/../<repo>-worktrees/<branch>` (`/` in the branch becomes `-`), or to `<dir>/<repo>/<branch>` when `@agent_sidebar_worktree_dir` is set. A new tmux window opens after the agent's window, `claude` starts in it, and the cursor goes to that window's sidebar.
 - `O` lists the worktrees of the selected agent's repo. A worktree that has an agent shows that agent. A worktree without one gets a new window with `claude`.
 - `D` works on an agent in a linked worktree (`⊕ ... [wt]`). It asks, runs `git worktree remove`, and closes the agent's pane, because its directory is gone. If git refuses because of changes, it asks again before `--force`. The branch is never deleted.
+
+### Agents that start agents
+
+`agent-sidebar` has commands for scripts and for Claude Code itself. With the `tmux-agents` skill installed, you can tell an agent "start 5 agents named a–e in this repo, each in a new worktree on branch x, and give them these tasks", and it runs:
+
+```bash
+agent-sidebar spawn --name api --branch feat/api --prompt "Add the /health endpoint."
+agent-sidebar list [--json]                 # name, status, branch, pane, path
+agent-sidebar prompt api "Also add a test."  # paste a prompt and press Enter
+agent-sidebar wait api --timeout 600        # until idle / done / waiting; exit 1 on timeout
+agent-sidebar read api --lines 60           # the last lines of the agent's screen
+```
+
+- `spawn` adds the worktree like `W` (an existing branch is checked out, otherwise it is created; a branch that has a worktree reuses it), opens a window named after the agent in the background, in the caller's session (`--session`), and types `claude -n <name> "<prompt>"` into it. The prompt goes through a file, so quotes and newlines are safe. `--no-worktree` uses the repo itself, `--repo` another repo, `--prompt-file` a prompt from a file. It prints the new agent as JSON.
+- An agent is addressed by its name or its pane id (`%12`). Names must be unique.
+- `prompt` uses a bracketed paste, so a multi-line prompt is one message. `-` reads the prompt from stdin.
+- `wait` stops at `idle`, `done` or `waiting` (`--until` changes the list). Right after a prompt it first waits up to 10 s for the agent to start working.
 
 ### Resume after a tmux restart
 
@@ -194,14 +213,15 @@ To choose a background color, press `c` in the sidebar until you like the color.
 
 | File | Purpose |
 |------|---------|
-| `src/main.rs` | Commands (`toggle`, `ensure`, `next`, `resume`, `worktree-*`) and the TUI entry |
+| `src/main.rs` | Commands (`toggle`, `ensure`, `next`, `resume`, `spawn`, `prompt`, `list`, `wait`, `read`, `worktree-*`, `agent-new`) and the TUI entry |
+| `src/agents.rs` | `spawn`, `prompt`, `list`, `wait`, `read`: start and drive agents |
 | `src/ui.rs` | Sidebar TUI: keys, worker thread, follow, filters, J/K, colors |
 | `src/screen.rs` | Cell buffer that writes only changed cells (like curses) |
 | `src/model.rs` | Agents from tmux panes, sorting |
 | `src/live.rs` | Claude Code session files (`~/.claude/sessions`), background sessions |
 | `src/transcript.rs` | Context tokens and turn end from the transcript |
 | `src/git.rs` | Branch, worktree, ahead/behind and changes |
-| `src/worktree.rs` | `W` / `O` / `D`: add, open and remove worktrees |
+| `src/worktree.rs` | `W` / `O` / `D` / `N`: add, open and remove worktrees, start claude in a new window |
 | `src/resume.rs` | State file and `resume` after a tmux-resurrect restore |
 | `src/procs.rs` | Process tree (`/proc`) |
 | `src/panes.rs` | Sidebar panes, `jump` |
@@ -209,12 +229,13 @@ To choose a background color, press `c` in the sidebar until you like the color.
 | `src/config.rs` | Settings, UI strings, statuses |
 | `hooks/claude-hook.sh` | Claude Code hook that writes the agent status into tmux |
 | `agent-sidebar.tmux` | tmux key bindings and hooks |
+| `skills/tmux-agents/SKILL.md` | Claude Code skill: how an agent starts and drives other agents |
 | `install.sh` | Build, install and start |
 | `ROADMAP.md` | Ideas for later |
 
 ## Uninstall
 
-1. Remove the `source-file .../agent-sidebar.tmux` line from `~/.tmux.conf`.
+1. Remove the `source-file .../agent-sidebar.tmux` line from `~/.tmux.conf`, and the links `~/.local/bin/agent-sidebar` and `~/.claude/skills/tmux-agents`.
 2. Remove the `claude-hook.sh` entries from `~/.claude/settings.json`.
 3. Restart tmux, or unbind `prefix a` / `prefix Tab`, remove the `[42]` hooks and `@resurrect-hook-post-restore-all` by hand.
 
