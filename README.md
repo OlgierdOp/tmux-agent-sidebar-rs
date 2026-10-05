@@ -31,7 +31,7 @@ This is the Rust version. It started as a 1:1 port of the [Python version](https
 
 ## Requirements
 
-- Linux (the agent detection reads `/proc`)
+- Linux or macOS (the agent detection reads `/proc` on Linux and uses libproc on macOS)
 - tmux 3.2 or later (tested with 3.4)
 - Rust and cargo (to build)
 - `jq` (used by the Claude Code hook)
@@ -205,7 +205,7 @@ To choose a background color, press `c` in the sidebar until you like the color.
 - **Reliable selection follow.** The visible sidebar compares the current window and active pane with the last pair it handled (`@agent_sidebar_focus`). It compares states, not events, so fast switching cannot make it miss a change. Visibility comes from `window_active_clients`, because tmux updates `session_attached` lazily.
 - **Non-blocking UI.** A worker thread collects the agent data (process tree, git, tokens). The main loop only handles keys, `F12` and drawing, so it never waits for the data. Prompts, menus and confirmations (`command-prompt`, `display-menu`, `confirm-before`) run in the background, because tmux returns from them only when you close them. The worktree work runs in `agent-sidebar worktree-*` commands that tmux starts.
 - **Drawing.** `src/screen.rs` keeps a cell buffer and writes only the cells that changed, with the same color codes that curses writes for `tmux-256color`.
-- **Agent detection.** The sidebar reads `tmux list-panes -a` and the process tree of each pane (`/proc/PID/task/TID/children`, with a full `/proc` scan as fallback). Any pane with a `claude` process in it is an agent.
+- **Agent detection.** The sidebar reads `tmux list-panes -a` and the process tree of each pane. On Linux it reads `/proc/PID/task/TID/children`, with a full `/proc` scan as fallback. On macOS it calls libproc (`proc_listpids`, `proc_name`, `proc_pidinfo`) and `sysctl(KERN_PROCARGS2)` for argv, without process spawns. Any pane with a `claude` process in it is an agent. A process is `claude` when its name or one of its first two arguments is `claude` (on macOS the process name is the version file, for example `2.1.289`, and `argv[0]` is `claude`).
 - **Status.** Two sources:
   - Claude Code writes the state of each session (`busy`, `waiting`, `idle`) to `~/.claude/sessions/<pid>.json`. The sidebar finds the `claude` process of the pane and reads this file. When the pane runs only a client of a background session (`parkedJobId`), the sidebar reads the file of the background session (`jobId`). The file is correct at once, also after `Esc`, `Ctrl+C` or a rejected permission prompt, when no hook runs.
   - Every 0.1 s each sidebar checks these files (only a `stat` when nothing changed), so a status change shows in about 50 ms.
@@ -232,7 +232,9 @@ To choose a background color, press `c` in the sidebar until you like the color.
 | `src/git.rs` | Branch, worktree, ahead/behind and changes |
 | `src/worktree.rs` | `W` / `O` / `D` / `N`: add, open and remove worktrees, start claude in a new window |
 | `src/resume.rs` | State file and `resume` after a tmux-resurrect restore |
-| `src/procs.rs` | Process tree (`/proc`) |
+| `src/procs/mod.rs` | Process tree: find the `claude` process of a pane |
+| `src/procs/linux.rs` | Linux backend (`/proc`) |
+| `src/procs/macos.rs` | macOS backend (libproc, `sysctl`) |
 | `src/panes.rs` | Sidebar panes, `jump` |
 | `src/tmux.rs` | tmux calls |
 | `src/config.rs` | Settings, UI strings, statuses |

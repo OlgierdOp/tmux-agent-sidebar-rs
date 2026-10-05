@@ -7,7 +7,7 @@ use serde_json::Value;
 use crate::config::{status_def, SEP};
 use crate::git::{git_info, GitInfo};
 use crate::live::{live_transcript, resolve_status, session_info, state};
-use crate::procs::{claude_pid_in, proc_cwd, process_children, HAS_CHILDREN_FILE};
+use crate::procs::{claude_pid_in, proc_cwd, Tree};
 use crate::transcript::{guess_transcript, transcript_info};
 
 const PANE_FIELDS: [&str; 17] = [
@@ -87,7 +87,7 @@ fn position(p: &Pane) -> String {
 
 /// The agents, and the positions of the sidebar panes.
 pub fn collect(home_session: Option<&str>, order: &[String]) -> (Vec<Agent>, Vec<String>) {
-    let children = (!*HAS_CHILDREN_FILE).then(process_children);
+    let tree = Tree::new();
     let mut agents = Vec::new();
     let mut sidebars = Vec::new();
     for p in list_panes() {
@@ -96,7 +96,7 @@ pub fn collect(home_session: Option<&str>, order: &[String]) -> (Vec<Agent>, Vec
             continue;
         }
         let Ok(pane_pid) = p["pane_pid"].parse::<i64>() else { continue };
-        let pid = claude_pid_in(pane_pid, children.as_ref());
+        let pid = claude_pid_in(pane_pid, &tree);
         if pid.is_none() && p["@agent_status"].is_empty() {
             continue;
         }
