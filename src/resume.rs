@@ -34,7 +34,11 @@ pub fn snapshot(agents: &[Agent], sidebars: &[String]) -> String {
         .iter()
         .filter_map(|a| {
             let id = a.session_id.as_ref()?;
-            Some(json!({"position": a.position, "session_id": id, "cwd": a.cwd}))
+            // the parent by position: pane ids change after a restore
+            let parent = a.parent.as_deref()
+                .and_then(|p| agents.iter().find(|x| x.pane == p))
+                .map(|x| x.position.clone());
+            Some(json!({"position": a.position, "session_id": id, "cwd": a.cwd, "parent": parent}))
         })
         .collect();
     serde_json::to_string_pretty(&json!({"agents": agents, "sidebars": sidebars}))
@@ -101,6 +105,14 @@ pub fn cmd_resume() {
         tmux!["send-keys", "-t", pane, "Enter"];
         resumed += 1;
     }
+    // the links from an agent to the agent that started it
+    for a in state["agents"].as_array().into_iter().flatten() {
+        if let (Some(pos), Some(parent)) = (a["position"].as_str(), a["parent"].as_str())
+            && let (Some((pane, ..)), Some((parent, ..))) = (panes.get(pos), panes.get(parent))
+        {
+            tmux!["set-option", "-p", "-t", pane, "@agent_parent", parent];
+        }
+    }
     // the restored sidebar panes are plain shells now: close them
     for pos in state["sidebars"].as_array().into_iter().flatten().filter_map(Value::as_str) {
         if let Some((pane, cmd, _, sidebar_shape)) = panes.get(pos)
@@ -129,12 +141,9 @@ mod tests {
 
     #[test]
     fn snapshot_only_running_agents() {
-        let mut a = crate::model::Agent {
-            pane: "%1".into(), position: "agents:1.2".into(), session_id: Some("abc".into()),
-            session: "agents".into(), window_id: "@1".into(), order: (1, 2), window: "w".into(),
-            name: String::new(), pid: Some(1), hook: "idle".into(), transcript: None,
-            cwd: "/x".into(), git: None, tokens: None, status: "idle".into(), ts: None,
-        };
+        let mut a = crate::model::test_agent("%1", "agents", None);
+        a.position = "agents:1.2".into();
+        a.session_id = Some("abc".into());
         let mut b = a.clone();
         b.session_id = None;
         a.cwd = "/repo".into();
@@ -142,5 +151,18 @@ mod tests {
         assert_eq!(v["agents"].as_array().unwrap().len(), 1);
         assert_eq!(v["agents"][0]["session_id"], "abc");
         assert_eq!(v["sidebars"][0], "agents:1.1");
+    }
+
+    #[test]
+    fn snapshot_keeps_the_parent_by_position() {
+        let mut p = crate::model::test_agent("%1", "agents", None);
+        p.position = "agents:1.1".into();
+        p.session_id = Some("p".into());
+        let mut c = crate::model::test_agent("%7", "agents", Some("%1"));
+        c.position = "agents:3.1".into();
+        c.session_id = Some("c".into());
+        let v: Value = serde_json::from_str(&snapshot(&[p, c], &[])).unwrap();
+        assert_eq!(v["agents"][0]["parent"], Value::Null);
+        assert_eq!(v["agents"][1]["parent"], "agents:1.1");
     }
 }

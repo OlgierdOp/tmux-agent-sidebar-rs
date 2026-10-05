@@ -45,8 +45,19 @@ pub fn ensure(window: &str) -> Option<String> {
     Some(sb)
 }
 
+/// You look at the agent: a "done" agent is no longer highlighted.
+pub fn mark_seen(agent: &mut Agent) {
+    if agent.status == "done" || agent.hook == "done" {
+        tmux!["set-option", "-p", "-t", agent.pane, "@agent_status", "idle"];
+        agent.status = "idle".into();
+        agent.hook = "idle".into();
+    }
+}
+
 /// Show the agent's window. focus=false: the cursor stays in the sidebar.
 pub fn jump(agent: &mut Agent, focus: bool) {
+    // before the switch: the target window's sidebar reads it on its F12
+    mark_seen(agent);
     let pane = agent.pane.clone();
     let window = tmux!["display-message", "-p", "-t", pane, "#{window_id}"].trim().to_string();
     // add the sidebar before the window becomes visible
@@ -69,10 +80,4 @@ pub fn jump(agent: &mut Agent, focus: bool) {
         tmux!["select-pane", "-t", sb];
     }
     tmux!["set-option", "-g", "@agent_sidebar_sel", pane];
-    if agent.status == "done" {
-        // seen -> no longer highlighted
-        tmux!["set-option", "-p", "-t", pane, "@agent_status", "idle"];
-        agent.status = "idle".into();
-        agent.hook = "idle".into();
-    }
 }

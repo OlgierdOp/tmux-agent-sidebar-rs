@@ -39,8 +39,9 @@ case "$event" in
     esac ;;
   Stop)
     # if you are looking at this pane right now, do not highlight it
+    # (the same format as SEEN in src/config.rs)
     seen=$(tmux display-message -p -t "$pane" \
-      '#{&&:#{pane_active},#{window_active_clients}}' 2>/dev/null)
+      '#{&&:#{window_active_clients},#{||:#{pane_active},#{==:#{@agent_sidebar_sel},#{pane_id}}}}' 2>/dev/null)
     if [ "$seen" = 1 ]; then set_status idle; else set_status done; fi ;;
   SessionEnd)
     tmux set-option -p -u -t "$pane" @agent_status \; \

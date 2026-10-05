@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::json;
 
-use crate::model::{collect_agents, Agent};
+use crate::model::{collect_agents, last_window, Agent};
 use crate::tmux::current_session;
 use crate::worktree;
 
@@ -116,13 +116,28 @@ pub fn cmd_spawn(args: &[String]) -> i32 {
         Some(s) => s.to_string(),
         None => current_session(std::env::var("TMUX_PANE").ok().as_deref()),
     };
-    let out = tmux!["new-window", "-d", "-t", format!("{session}:"), "-c", dir, "-n", name,
-                    "-P", "-F", "#{pane_id} #{window_id}"];
+    // the window goes after the windows of the caller and its children, so the
+    // window order (F-keys, prefix 1-9) is the order in the sidebar's tree
+    let caller = std::env::var("TMUX_PANE").ok().filter(|p| !p.is_empty());
+    let after = caller.as_deref()
+        .and_then(|p| last_window(&collect_agents(None, &[]), p, &session));
+    let mut args = vec!["new-window".to_string(), "-d".into()];
+    match after {
+        Some(w) => args.extend(["-a".into(), "-t".into(), w]),
+        None => args.extend(["-t".into(), format!("{session}:")]),
+    }
+    args.extend(["-c".into(), dir.clone(), "-n".into(), name.into(), "-P".into(), "-F".into(),
+                 "#{pane_id} #{window_id}".into()]);
+    let out = crate::tmux::tmux(&args);
     let mut it = out.split_whitespace();
     let (Some(pane), Some(window)) = (it.next(), it.next()) else {
         return fail(&format!("tmux could not open a window in session {session}"));
     };
     tmux!["set-option", "-p", "-t", pane, "@agent_name", name];
+    // the caller is the parent: the sidebar shows the new agent under it
+    if let Some(parent) = &caller {
+        tmux!["set-option", "-p", "-t", pane, "@agent_parent", parent];
+    }
     worktree::start_claude(pane, Some(name), prompt.as_deref());
     println!("{}", json!({"name": name, "pane": pane, "window": window, "session": session,
                           "path": dir, "branch": branch}));
@@ -169,13 +184,18 @@ pub fn cmd_prompt(args: &[String]) -> i32 {
 
 pub fn cmd_list(args: &[String]) -> i32 {
     let agents = collect_agents(None, &[]);
+    // the name of the agent that started it (only while that agent runs)
+    let parent = |a: &Agent| {
+        let p = a.parent.as_deref()?;
+        agents.iter().find(|x| x.pane == p).map(|x| x.label().to_string())
+    };
     if parse(args).has("--json") {
         let list: Vec<_> = agents
             .iter()
             .map(|a| json!({
                 "name": a.label(), "pane": a.pane, "session": a.session, "status": a.status,
                 "branch": a.git.as_ref().map(|g| g.branch.clone()), "path": a.cwd,
-                "tokens": a.tokens,
+                "tokens": a.tokens, "parent": parent(a),
             }))
             .collect();
         println!("{}", serde_json::to_string_pretty(&list).unwrap_or_default());
@@ -183,7 +203,8 @@ pub fn cmd_list(args: &[String]) -> i32 {
     }
     for a in &agents {
         let branch = a.git.as_ref().map_or("-", |g| g.branch.as_str());
-        println!("{}\t{}\t{}\t{}\t{}", a.label(), a.status, branch, a.pane, a.cwd);
+        let parent = parent(a).unwrap_or_else(|| "-".into());
+        println!("{}\t{}\t{}\t{}\t{}\t{parent}", a.label(), a.status, branch, a.pane, a.cwd);
     }
     0
 }

@@ -15,6 +15,7 @@ tmux agent sidebar (Rust): a tmux sidebar that lists the Claude Code agents runn
   - `skills/tmux-agents/SKILL.md` when the `spawn` / `prompt` / `list` / `wait` / `read` commands change.
 - Write all code, comments, UI strings, docs and commit messages in English.
 - Put UI strings in `Strings` / `STRINGS` in `src/config.rs`. Do not hard-code user-visible text.
+- The code must work on macOS and on Linux. Use only tmux formats, shell commands and file paths that both have (for example, no `/proc` without a macOS path, no GNU-only flags of `sed`, `date` or `stat`). Test on both when a change touches processes, paths or shell commands.
 - Keep dependencies few (now: crossterm, serde_json, unicode-width). Ask before you add one.
 - Keep a normal window switch free of process spawns. The tmux hooks must check their condition in tmux formats before they call `run-shell`.
 - Keep the per-tick path cheap: the main loop runs every 0.1 s in every sidebar pane. Only `stat` calls and in-memory work there; process spawns only on a change or a key. Slow work (git, process scans) goes to the worker thread.
@@ -37,7 +38,7 @@ export TMUX="$(tmux -L agtest display -p '#{socket_path}'),1,0"
 ```
 
 - Pass `-f /dev/null` on every tmux call: a call that starts a server must never read `~/.tmux.conf`. `kill-server` returns before the server is gone, so wait until `tmux -L agtest ls` fails before you start a new one.
-- A copy of `sleep` named `claude` works as a fake agent process. Put a fake `claude` command first in `PATH` when a test makes the sidebar type `claude` (worktrees, resume, `spawn`), and set `tmux set -g default-command "bash --norc --noprofile"`: the user's `~/.bashrc` puts `~/.local/bin` (the real `claude`) first in `PATH` again.
+- A copy of `sleep` named `claude` works as a fake agent process on Linux. On macOS the kernel kills a copied system binary: compile a small one instead (`printf '#include <unistd.h>\nint main(){sleep(1000);}' | cc -x c -o claude -`). Put a fake `claude` command first in `PATH` when a test makes the sidebar type `claude` (worktrees, resume, `spawn`), and set `tmux set -g default-command "bash --norc --noprofile"`: the user's `~/.bashrc` puts `~/.local/bin` (the real `claude`) first in `PATH` again.
 - Point `CLAUDE_CONFIG_DIR` and `XDG_STATE_HOME` to test directories (`tmux set-environment -g ...`) to fake session files and the resume state.
 - Create a new directory for each test run (`mktemp -d`). Do not use `rm -rf`.
 - To fake hook events, pipe JSON into the hook with `TMUX_PANE` set:

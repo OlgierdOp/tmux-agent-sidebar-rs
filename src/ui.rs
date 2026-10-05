@@ -9,12 +9,12 @@ use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseBu
 
 use crate::config::{
     status_def, t, Col, BG_CHOICES, FINISH_WAIT, HIDDEN_POLL, HIDDEN_REFRESH, ORDER_SEP, POLL,
-    REFRESH, SEL_BG, SEP, SIDEBAR_WIDTH, SPINNER, TICK,
+    REFRESH, SEEN, SEL_BG, SEP, SIDEBAR_WIDTH, SPINNER, TICK,
 };
 use crate::git;
 use crate::live::{resolve_status, session_info, state};
-use crate::model::{collect, sort_agents, Agent};
-use crate::panes::jump;
+use crate::model::{collect, sort_agents, subtree, window_swaps, Agent};
+use crate::panes::{jump, mark_seen};
 use crate::screen::{Color, Screen, Style};
 use crate::tmux;
 use crate::tmux::sidebar_panes;
@@ -38,6 +38,22 @@ enum Key {
     Backspace,
     Click(i64),
     Other,
+}
+
+/// How a shown agent sits in the tree of agents (parent -> children).
+#[derive(Clone, Default)]
+struct TreeRow {
+    depth: usize,
+    /// per level above the agent: a later agent hangs on that level (draw `│`)
+    rails: Vec<bool>,
+    /// a sibling comes later: `├─` (the last one gets `└─`)
+    more: bool,
+    /// its children are shown below it
+    open: bool,
+    /// number of agents below it (children, their children, ...)
+    kids: usize,
+    /// folded: the status counts of the hidden agents below it
+    hidden: Vec<(String, Col)>,
 }
 
 /// `threading.Event`: the worker waits on it, the UI sets it.
@@ -86,8 +102,12 @@ pub struct Ui {
     scroll: i64,
     /// all agents from the worker
     all: Vec<Agent>,
-    /// the agents shown: `all` after the state filter and the search
+    /// the agents shown: `all` after the state filter, the search and the folds
     agents: Vec<Agent>,
+    /// tree position of each shown agent (same order as `agents`)
+    tree: Vec<TreeRow>,
+    /// folded agents (their children are hidden), shared by all sidebars
+    collapsed: HashSet<String>,
     /// state filter (w/d/b): only agents with this status
     state_filter: Option<&'static str>,
     /// search text (/): name, window, session, branch or path contains it
@@ -179,6 +199,8 @@ impl Ui {
             scroll: 0,
             all: Vec::new(),
             agents: Vec::new(),
+            tree: Vec::new(),
+            collapsed: HashSet::new(),
             state_filter: None,
             query: String::new(),
             searching: false,
@@ -276,13 +298,14 @@ impl Ui {
             "#{?window_active_clients,1,0}", "#{pane_width}",
             "#{@agent_sidebar_bg}", "#{P:#{?pane_active,#{pane_id},}}", "#{window_id}",
             "#{@agent_sidebar_focus}", "#{@agent_sidebar_order}", "#{@agent_sidebar_gen}",
-            "#{S:#{W:#{P:#{pane_id}}}}",
+            "#{S:#{W:#{P:#{pane_id}}}}", "#{S:#{W:#{P:#{pane_id}=#{@agent_status} }}}",
+            "#{@agent_sidebar_folded}",
         ];
         let out = tmux!["display-message", "-p", "-t", self.me, fields.join(SEP)];
         let out = out.trim_end_matches('\n');
         let parts: Vec<&str> = out.split(SEP).collect();
         let [on, sel, only, home, own, panes, visible, width, bg, active, window, focus, order,
-             generation, all_panes] = parts[..]
+             generation, all_panes, hooks, collapsed] = parts[..]
         else {
             return Poll::Exit;
         };
@@ -298,6 +321,13 @@ impl Ui {
             tmux!["resize-pane", "-t", self.me, "-x", SIDEBAR_WIDTH.to_string()];
         }
         let mut changed = self.drop_closed(all_panes);
+        changed |= self.apply_hooks(hooks);
+        let collapsed: HashSet<String> = collapsed.split_whitespace().map(str::to_string).collect();
+        if collapsed != self.collapsed {
+            self.collapsed = collapsed;
+            self.apply_filter();
+            changed = true;
+        }
         let order: Vec<String> =
             order.split(ORDER_SEP).filter(|s| !s.is_empty()).map(str::to_string).collect();
         if order != self.order {
@@ -338,6 +368,9 @@ impl Ui {
         if self.visible && self.loaded && key != focus {
             self.follow(window, active, &key);
             changed = true;
+        }
+        if self.visible && self.loaded {
+            self.mark_seen_here(active);
         }
         if changed { Poll::Changed } else { Poll::Same }
     }
@@ -405,11 +438,12 @@ impl Ui {
         if self.agents.is_empty() {
             return;
         }
-        let j = self.sel as i64 + delta;
         let a = self.agents[self.sel].clone();
-        let b = (0 <= j && (j as usize) < self.agents.len()).then(|| self.agents[j as usize].clone());
-        let Some(b) = b.filter(|b| b.session == a.session) else {
-            self.move_session(delta);
+        let Some(b) = self.neighbour(delta) else {
+            // a child moves only among its siblings
+            if a.depth == 0 || !self.tree_mode() {
+                self.move_session(delta);
+            }
             return;
         };
         let mut cmd: Vec<String>;
@@ -421,6 +455,37 @@ impl Ui {
                     x.order = b.order;
                 } else if x.pane == b.pane {
                     x.order = a.order;
+                }
+            }
+        } else if self.tree_mode() {
+            // swap the two agents with the agents below them, and their
+            // windows, so the window order stays the order in the list
+            let pos = |p: &str| self.all.iter().position(|x| x.pane == p);
+            let (Some(ia), Some(ib)) = (pos(&a.pane), pos(&b.pane)) else { return };
+            let (ra, rb) = (subtree(&self.all, ia), subtree(&self.all, ib));
+            let (first, second) = if ra.start < rb.start { (ra, rb) } else { (rb, ra) };
+            let all = &self.all;
+            let wanted = all[..first.start].iter().chain(&all[second.clone()])
+                .chain(&all[first.end..second.start]).chain(&all[first]).chain(&all[second.end..]);
+            let mut want: Vec<String> = Vec::new();
+            for x in wanted.filter(|x| x.session == a.session) {
+                if !want.contains(&x.window_id) {
+                    want.push(x.window_id.clone());
+                }
+            }
+            let index: HashMap<String, i64> = all.iter().filter(|x| x.session == a.session)
+                .map(|x| (x.window_id.clone(), x.order.0)).collect();
+            let (swaps, new_index) = window_swaps(&want, &index);
+            cmd = Vec::new();
+            for (x, y) in swaps {
+                cmd.extend(["swap-window".into(), "-d".into(), "-s".into(), x, "-t".into(), y,
+                            ";".into()]);
+            }
+            // you keep looking at the same window
+            cmd.extend(["select-window".into(), "-t".into(), self.window.clone()]);
+            for x in self.all.iter_mut().filter(|x| x.session == a.session) {
+                if let Some(i) = new_index.get(&x.window_id) {
+                    x.order.0 = *i;
                 }
             }
         } else {
@@ -447,6 +512,25 @@ impl Ui {
         cmd.extend([";".into(), "set-option".into(), "-g".into(), "@agent_sidebar_gen".into(),
                     self.generation.clone()]);
         self.poke_others(cmd);
+    }
+
+    /// The agent that J (+1) or K (-1) swaps the selected one with: the next
+    /// agent of the session, in the tree the next sibling.
+    fn neighbour(&self, delta: i64) -> Option<Agent> {
+        let a = &self.agents[self.sel];
+        let tree = self.tree_mode();
+        let mut j = self.sel as i64 + delta;
+        while 0 <= j && (j as usize) < self.agents.len() {
+            let x = &self.agents[j as usize];
+            if x.session != a.session || (tree && x.depth < a.depth) {
+                return None;
+            }
+            if !tree || x.depth == a.depth {
+                return Some(x.clone());
+            }
+            j += delta;
+        }
+        None
     }
 
     /// Run a tmux command and send F12 to the other sidebars, so they
@@ -497,8 +581,26 @@ impl Ui {
     fn sync_sel(&mut self) {
         self.sel = match self.agents.iter().position(|a| a.pane == self.shared_sel) {
             Some(i) => i,
-            None => self.sel.min(self.agents.len().saturating_sub(1)),
+            // a child of a folded agent: select the folded agent
+            None => self.shown_ancestor(&self.shared_sel)
+                .unwrap_or(self.sel.min(self.agents.len().saturating_sub(1))),
         };
+    }
+
+    /// The nearest shown agent above this one in the tree (index in `agents`).
+    fn shown_ancestor(&self, pane: &str) -> Option<usize> {
+        let k = self.all.iter().position(|a| a.pane == pane)?;
+        let mut depth = self.all[k].depth;
+        for a in self.all[..k].iter().rev() {
+            if a.depth >= depth {
+                continue;
+            }
+            if let Some(i) = self.agents.iter().position(|x| x.pane == a.pane) {
+                return Some(i);
+            }
+            depth = a.depth;
+        }
+        None
     }
 
     /// Apply Claude Code's live state at once (every tick). It only stats
@@ -546,7 +648,7 @@ impl Ui {
     fn mark_finished(&mut self, i: usize) {
         let pane = self.all[i].pane.clone();
         let seen = tmux!["display-message", "-p", "-t", pane,
-                         "#{&&:#{pane_active},#{window_active_clients}}"].trim() == "1";
+                         SEEN].trim() == "1";
         let hook = if seen { "idle" } else { "done" };
         self.all[i].hook = hook.to_string();
         let ts = (now_secs() as i64).to_string();
@@ -588,9 +690,100 @@ impl Ui {
             .any(|field| field.to_lowercase().contains(&q))
     }
 
+    /// The list is a tree (children under their parent) while no filter is
+    /// active. A filter shows the matching agents as a flat list.
+    fn tree_mode(&self) -> bool {
+        self.state_filter.is_none() && self.query.is_empty()
+    }
+
     /// Rebuild the shown list from all agents.
     fn apply_filter(&mut self) {
-        self.agents = self.all.iter().filter(|a| self.matches(a)).cloned().collect();
+        let tree = self.tree_mode();
+        if !tree {
+            self.agents = self.all.iter().filter(|a| self.matches(a)).cloned().collect();
+            self.tree = vec![TreeRow::default(); self.agents.len()];
+            return;
+        }
+        // `all` is in tree order: an agent's descendants follow it, deeper
+        let below = |k: usize| {
+            let d = self.all[k].depth;
+            self.all[k + 1..].iter().take_while(move |x| x.depth > d)
+        };
+        let mut shown = Vec::new();
+        let mut kids = Vec::new();
+        let mut hidden = Vec::new();
+        let mut fold: Option<usize> = None; // depth of the folded agent we are in
+        for (k, a) in self.all.iter().enumerate() {
+            if let Some(d) = fold {
+                if a.depth > d {
+                    continue;
+                }
+                fold = None;
+            }
+            let n = below(k).count();
+            let folded = n > 0 && self.collapsed.contains(&a.pane);
+            if folded {
+                fold = Some(a.depth);
+            }
+            shown.push(a.clone());
+            kids.push(n);
+            hidden.push(if folded { Self::counts_label(&below(k).collect::<Vec<_>>()) } else { vec![] });
+        }
+        let mut rows = Vec::with_capacity(shown.len());
+        // rails[l]: the agent on the current path at depth l + 1 has a later sibling
+        let mut rails: Vec<bool> = Vec::new();
+        for (i, a) in shown.iter().enumerate() {
+            let d = a.depth;
+            let more = shown[i + 1..].iter().take_while(|x| x.depth >= d).any(|x| x.depth == d);
+            rails.truncate(d.saturating_sub(1));
+            let row_rails = rails.clone();
+            if d > 0 {
+                rails.push(more);
+            }
+            rows.push(TreeRow {
+                depth: d,
+                rails: row_rails,
+                more,
+                open: shown.get(i + 1).is_some_and(|x| x.depth > d),
+                kids: kids[i],
+                hidden: std::mem::take(&mut hidden[i]),
+            });
+        }
+        self.agents = shown;
+        self.tree = rows;
+    }
+
+    /// Space: fold or unfold the selected agent's children. On a child: fold
+    /// its parent and select the parent.
+    fn toggle_fold(&mut self) {
+        if !self.tree_mode() {
+            return;
+        }
+        let Some(a) = self.agents.get(self.sel) else { return };
+        let pane = if self.tree[self.sel].kids > 0 {
+            a.pane.clone()
+        } else {
+            let parent = self.agents[..self.sel].iter().rev().find(|x| x.depth < a.depth);
+            match parent {
+                Some(p) if a.depth > 0 => p.pane.clone(),
+                _ => return,
+            }
+        };
+        if !self.collapsed.remove(&pane) {
+            self.collapsed.insert(pane.clone());
+        }
+        // forget closed agents
+        let all = &self.all;
+        self.collapsed.retain(|p| all.iter().any(|a| a.pane == *p));
+        self.apply_filter();
+        let mut value: Vec<&str> = self.collapsed.iter().map(String::as_str).collect();
+        value.sort();
+        self.poke_others(vec!["set-option".into(), "-g".into(), "@agent_sidebar_folded".into(),
+                              value.join(" ")]);
+        if !self.agents.iter().any(|a| a.pane == self.shared_sel)
+            && let Some(i) = self.agents.iter().position(|a| a.pane == pane) {
+                self.select(i as i64);
+            }
     }
 
     fn set_state_filter(&mut self, st: &'static str) {
@@ -776,15 +969,32 @@ impl Ui {
                 self.put(y + dy, 0, &" ".repeat((w - 1).max(0) as usize), st);
             }
         }
+        let row = self.tree.get(i).cloned().unwrap_or_default();
+        // a child is indented 2 columns per level
+        let ind = 2 * row.depth as i64;
         let def = status_def(&a.status).unwrap_or_else(|| status_def("unknown").unwrap());
         let mut sym = def.symbol;
         if a.status == "working" {
             sym = SPINNER[(now_secs() * 2.0) as usize % SPINNER.len()];
         }
         let st = c(self, def.color).bold();
-        self.put(y, 1, sym, st);
+        self.put(y, 1 + ind, sym, st);
         let st = c(self, Col::Text).bold();
-        self.put(y, 2, &format!(" {} {}", i + 1, a.label()), st);
+        let head = format!(" {} {}", i + 1, a.label());
+        self.put(y, 2 + ind, &head, st);
+        if row.kids > 0 {
+            // ▾n: n agents below, shown. ▸n: folded, with their status counts
+            let mut x = 2 + ind + len(&head) + 1;
+            let mark = format!("{}{}", if row.open { "▾" } else { "▸" }, row.kids);
+            let st = c(self, Col::Cyan);
+            self.put(y, x, &mark, st);
+            x += len(&mark) + 1;
+            for (label, col) in &row.hidden {
+                let st = c(self, *col).bold();
+                self.put(y, x, label, st);
+                x += len(label) + 1;
+            }
+        }
         let tokens = fmt_tokens(a.tokens);
         if !tokens.is_empty() {
             let st = c(self, Col::Gray);
@@ -794,9 +1004,9 @@ impl Ui {
             Some(g) => {
                 let st = c(self, Col::Magenta);
                 let branch = format!("⎇ {}", g.branch);
-                self.put(y + 1, 3, &branch, st);
+                self.put(y + 1, 3 + ind, &branch, st);
                 // ahead / behind the upstream, changed files
-                let mut x = 3 + len(&branch) + 1;
+                let mut x = 3 + ind + len(&branch) + 1;
                 let parts = [("↑", g.status.ahead, Col::Green), ("↓", g.status.behind, Col::Red),
                              ("●", g.status.changes, Col::Yellow)];
                 for (sym, n, col) in parts {
@@ -808,35 +1018,110 @@ impl Ui {
                     }
                 }
                 let tag = if g.linked_worktree { " [wt]" } else { "" };
-                let path = git::short_path(&g.top, Some(w - 7 - len(tag)));
+                let path = git::short_path(&g.top, Some(w - 7 - ind - len(tag)));
                 let icon = if g.linked_worktree { "⊕ " } else { "⌂ " };
                 let st = c(self, Col::Blue);
-                self.put(y + 2, 3, &format!("{icon}{path}{tag}"), st);
+                self.put(y + 2, 3 + ind, &format!("{icon}{path}{tag}"), st);
             }
             None => {
                 let st = c(self, Col::Gray);
-                self.put(y + 1, 3, t().no_git, st);
+                self.put(y + 1, 3 + ind, t().no_git, st);
                 let st = c(self, Col::Blue);
-                self.put(y + 2, 3, &format!("⌂ {}", git::short_path(&a.cwd, Some(w - 7))), st);
+                let path = git::short_path(&a.cwd, Some(w - 7 - ind));
+                self.put(y + 2, 3 + ind, &format!("⌂ {path}"), st);
             }
         }
         let gray = self.style(Col::Gray, false);
-        self.put(y + 3, 1, &"┄".repeat((w - 3).max(0) as usize), gray);
+        let sep = 1 + ind + if row.open { 2 } else { 0 };
+        self.put(y + 3, sep, &"┄".repeat((w - sep - 2).max(0) as usize), gray);
+        self.draw_rails(y, &row, selected);
+    }
+
+    /// The tree lines of an agent's 4 rows: `│` for the levels above it,
+    /// `├─` / `└─` to the agent, `│` down to its children.
+    fn draw_rails(&mut self, y: i64, row: &TreeRow, selected: bool) {
+        // the separator row is not on the selection background
+        let st = |ui: &Ui, dy: i64| ui.style(Col::Gray, selected && dy < LINES_PER_AGENT);
+        for (l, on) in row.rails.iter().enumerate() {
+            if *on {
+                for dy in 0..=LINES_PER_AGENT {
+                    let s = st(self, dy);
+                    self.put(y + dy, 1 + 2 * l as i64, "│", s);
+                }
+            }
+        }
+        if row.depth > 0 {
+            let x = 1 + 2 * (row.depth as i64 - 1);
+            let s = st(self, 0);
+            self.put(y, x, if row.more { "├─" } else { "└─" }, s);
+            if row.more {
+                for dy in 1..=LINES_PER_AGENT {
+                    let s = st(self, dy);
+                    self.put(y + dy, x, "│", s);
+                }
+            }
+        }
+        if row.open {
+            for dy in 1..=LINES_PER_AGENT {
+                let s = st(self, dy);
+                self.put(y + dy, 1 + 2 * row.depth as i64, "│", s);
+            }
+        }
     }
 
     // --- actions
 
     fn go(&mut self, i: i64, focus: bool) {
         if 0 <= i && (i as usize) < self.agents.len() {
+            // seen before select() pokes the other sidebars, so they read it
+            self.mark_seen(&self.agents[i as usize].pane.clone());
             self.select(i);
             jump(&mut self.agents[i as usize], focus);
-            // jump marks a "done" agent as seen
-            let a = &self.agents[i as usize];
-            if let Some(x) = self.all.iter_mut().find(|x| x.pane == a.pane) {
-                x.status = a.status.clone();
-                x.hook = a.hook.clone();
+        }
+    }
+
+    /// The agent is in front of you: a "done" agent becomes "idle" (here
+    /// and in the tmux option, which the other sidebars read on F12).
+    fn mark_seen(&mut self, pane: &str) {
+        for list in [&mut self.all, &mut self.agents] {
+            for a in list.iter_mut().filter(|a| a.pane == pane) {
+                mark_seen(a);
             }
         }
+    }
+
+    /// The window of this sidebar is visible: its agent with the focus, or
+    /// the selected one when the focus is in the sidebar, counts as seen.
+    fn mark_seen_here(&mut self, active: &str) {
+        let pane = if active == self.me { self.shared_sel.clone() } else { active.to_string() };
+        let here = self.all.iter().any(|a| {
+            a.pane == pane && a.window_id == self.window && (a.hook == "done" || a.status == "done")
+        });
+        if here {
+            self.mark_seen(&pane);
+            self.apply_filter();
+        }
+    }
+
+    /// The hook statuses (`@agent_status`) of all panes, as one poll read
+    /// them: `%1=idle %2=done ...`. Another sidebar or a hook may have
+    /// changed them since the worker collected. True when one changed.
+    fn apply_hooks(&mut self, hooks: &str) -> bool {
+        let mut changed = false;
+        for (pane, hook) in hooks.split_whitespace().filter_map(|p| p.split_once('=')) {
+            let Some(a) = self.all.iter_mut().find(|a| a.pane == pane) else { continue };
+            if hook.is_empty() || a.hook == hook || status_def(hook).is_none() {
+                continue;
+            }
+            a.hook = hook.to_string();
+            // refresh_live corrects it from Claude Code's live state
+            a.status = hook.to_string();
+            changed = true;
+        }
+        if changed {
+            self.apply_filter();
+        }
+        changed
     }
 
     fn next_waiting(&mut self) {
@@ -943,6 +1228,7 @@ impl Ui {
             Key::Char('i') => self.go(self.sel as i64, true),
             Key::Char(c @ '1'..='9') => self.go(c as i64 - '1' as i64, false),
             Key::Tab => self.next_waiting(),
+            Key::Char(' ') => self.toggle_fold(),
             Key::Char('s') => {
                 tmux!["set-option", "-g", "@agent_sidebar_only", if self.only_home { "" } else { "1" }];
                 self.scroll = 0;

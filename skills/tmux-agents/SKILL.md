@@ -22,12 +22,14 @@ agent-sidebar spawn --name api --branch feat/api --prompt "Add the /health endpo
 
 The window opens in the background: the user's view does not change. The command prints one JSON line: `{"name","pane","window","session","path","branch"}`.
 
+The new agent is linked to you: the sidebar shows it under your agent (a tree the user can fold), and `list` shows you as its parent.
+
 Several agents: run `spawn` once for each, one after the other. Give every agent a complete, self-contained task: it does not see this conversation.
 
 ## Drive agents
 
 ```bash
-agent-sidebar list                      # name, status, branch, pane, path (tab-separated)
+agent-sidebar list                      # name, status, branch, pane, path, parent (tab-separated)
 agent-sidebar list --json
 agent-sidebar prompt api "Also add a test for the 503 case."
 agent-sidebar wait api --timeout 600    # until it finished (idle/done) or needs approval (waiting)
@@ -39,6 +41,16 @@ agent-sidebar read api --lines 60       # the last lines of its screen
 - `wait` prints the status it stopped at. Exit code 1: timeout, or the agent is gone. Right after a `prompt`, `wait` first waits up to 10 s for the agent to start working. `--until` takes a comma list (default `idle,done,waiting`).
 - A `waiting` agent needs the user: tell the user which agent waits. Do not approve its permission prompts yourself.
 - Your Bash tool has a timeout. For long work, wait with `--timeout` in steps, or check with `list`.
+
+## Get notified when an agent stops
+
+To keep working while an agent works, run `wait` as a background command (Bash tool with `run_in_background: true`):
+
+```bash
+agent-sidebar wait api --timeout 3600
+```
+
+When the agent finishes (`idle`, `done`) or needs approval (`waiting`), the command exits and you get a notification. Then run `agent-sidebar read api` and decide what to do next. For several agents, start one background `wait` for each agent. A `waiting` agent needs the user: tell the user, as above.
 
 ## Example
 

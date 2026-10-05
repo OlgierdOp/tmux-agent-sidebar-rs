@@ -11,9 +11,9 @@ bind-key a run-shell -b "#{@agent_sidebar_dir}/target/release/agent-sidebar togg
 # prefix + Tab -> go to the agent that is waiting (red first, then green)
 bind-key Tab run-shell -b "#{@agent_sidebar_dir}/target/release/agent-sidebar next"
 
-# Ctrl+a (no prefix) -> go into the sidebar of this window, from any pane.
+# Ctrl+Alt+a (no prefix) -> go into the sidebar of this window, from any pane.
 # Turns the sidebar on when it is off. A normal press starts no process.
-bind-key -n C-a {
+bind-key -n C-M-a {
   if -F "#{@agent_sidebar_on}" {
     if -F "#{==:#{P:#{?#{@agent_sidebar},x,}},}" {
       run-shell -b "#{@agent_sidebar_dir}/target/release/agent-sidebar focus #{window_id}"

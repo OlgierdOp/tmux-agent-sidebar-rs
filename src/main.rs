@@ -7,7 +7,7 @@
 //!   agent-sidebar            # TUI of one sidebar pane
 //!   agent-sidebar toggle     # turn the sidebars on/off in all windows
 //!   agent-sidebar ensure W   # tmux hook: add a sidebar to window W if it has none
-//!   agent-sidebar focus W    # Ctrl+a: add a sidebar to window W if needed, go into it
+//!   agent-sidebar focus W    # Ctrl+Alt+a: add a sidebar to window W if needed, go into it
 //!   agent-sidebar next       # jump to the agent that is waiting for you
 
 #[macro_use]
@@ -95,7 +95,7 @@ fn main() {
             return;
         }
         Some("focus") => {
-            // Ctrl+a in a window without a sidebar yet: add one and go into it
+            // Ctrl+Alt+a in a window without a sidebar yet: add one and go into it
             if let Some(sb) = ensure(args.get(1).map(String::as_str).unwrap_or("")) {
                 tmux!["select-pane", "-t", sb];
             }

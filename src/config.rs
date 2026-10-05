@@ -101,6 +101,11 @@ pub const ORDER_SEP: &str = ":";
 /// How long a just-ended turn waits for its last transcript entry.
 pub const FINISH_WAIT: Duration = Duration::from_secs(1);
 pub const SEP: &str = "\t";
+/// tmux format: 1 if you look at this agent pane (its window is visible and
+/// it has the focus, or the sidebar has the focus and selects it). Keep it
+/// the same as in `hooks/claude-hook.sh`.
+pub const SEEN: &str =
+    "#{&&:#{window_active_clients},#{||:#{pane_active},#{==:#{@agent_sidebar_sel},#{pane_id}}}}";
 
 /// Colors of the palette (curses color pairs in the Python version).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

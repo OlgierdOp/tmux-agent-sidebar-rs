@@ -7,7 +7,7 @@ A sidebar for tmux that lists every [Claude Code](https://claude.com/claude-code
 - the worktree (linked git worktrees are marked),
 - the context size in tokens.
 
-You can move between agents with `j`/`k` and show an agent's window with `Enter`. The cursor stays in the sidebar while you do this. You can search and filter the list, add and remove git worktrees, and the agents come back after a tmux restart. An agent can start other agents in their own worktrees and give them tasks.
+You can move between agents with `j`/`k` and show an agent's window with `Enter`. The cursor stays in the sidebar while you do this. You can search and filter the list, add and remove git worktrees, and the agents come back after a tmux restart. An agent can start other agents in their own worktrees and give them tasks. The sidebar shows them under that agent, as a tree you can fold.
 
 This is the Rust version. It started as a 1:1 port of the [Python version](https://github.com/OlgierdOp/tmux-agent-sidebar), which is no longer developed.
 
@@ -75,7 +75,7 @@ Before it changes a file, the script makes a backup (`*.bak.<timestamp>`). You c
 |--------------|--------|
 | `prefix a`   | Show/hide the sidebar in all windows |
 | `prefix Tab` | Go into the agent that waits for you (red first, then green, current session first) |
-| `Ctrl+a`     | Go into the sidebar of the current window, from any pane (no prefix). Turns the sidebar on when it is off. |
+| `Ctrl+Alt+a` | Go into the sidebar of the current window, from any pane (no prefix). Turns the sidebar on when it is off. On macOS the terminal must send Option as Meta (iTerm2: Profiles → Keys → Left Option key: Esc+; Terminal: Use Option as Meta key). |
 
 Keys in the sidebar:
 
@@ -88,6 +88,7 @@ Keys in the sidebar:
 | `i`             | Go into the agent's pane |
 | `1`–`9`         | Show the agent with this number |
 | `Tab`           | Select the next agent that waits for you |
+| `Space`         | Fold / unfold the agents that the selected agent started. On such an agent: fold its parent. |
 | `/`             | Search (name, window, session, branch, path). `Enter` keeps the filter, `Esc` clears it. |
 | `w` / `d` / `b` | Show only waiting / done / busy agents (press again to turn off) |
 | `a` / `Esc`     | Show all agents (clears the search and the state filter) |
@@ -108,7 +109,7 @@ The selection follows you. If you move to another agent with tmux keys or a scri
 
 ### Search and filters
 
-The search and the state filters are local to one sidebar pane, so two tmux clients can use different filters. The active filters show in the title line, for example `[waiting /api]`. The counts in the title line always cover all agents. The numbers `1`–`9`, `j`/`k` and `Tab` work on the filtered list.
+The search and the state filters are local to one sidebar pane, so two tmux clients can use different filters. The active filters show in the title line, for example `[waiting /api]`. The counts in the title line always cover all agents. The numbers `1`–`9`, `j`/`k` and `Tab` work on the filtered list. While a filter or a search is active, the list is flat (no tree).
 
 ### Sessions
 
@@ -139,10 +140,41 @@ agent-sidebar wait api --timeout 600        # until idle / done / waiting; exit 
 agent-sidebar read api --lines 60           # the last lines of the agent's screen
 ```
 
-- `spawn` adds the worktree like `W` (an existing branch is checked out, otherwise it is created; a branch that has a worktree reuses it), opens a window named after the agent in the background, in the caller's session (`--session`), and types `claude -n <name> "<prompt>"` into it. The prompt goes through a file, so quotes and newlines are safe. `--no-worktree` uses the repo itself, `--repo` another repo, `--prompt-file` a prompt from a file. It prints the new agent as JSON.
+- `spawn` adds the worktree like `W` (an existing branch is checked out, otherwise it is created; a branch that has a worktree reuses it), opens a window named after the agent in the background, in the caller's session (`--session`), after the caller's window and the windows of its other children, and types `claude -n <name> "<prompt>"` into it. The prompt goes through a file, so quotes and newlines are safe. `--no-worktree` uses the repo itself, `--repo` another repo, `--prompt-file` a prompt from a file. It prints the new agent as JSON.
 - An agent is addressed by its name or its pane id (`%12`). Names must be unique.
 - `prompt` uses a bracketed paste, so a multi-line prompt is one message. `-` reads the prompt from stdin.
 - `wait` stops at `idle`, `done` or `waiting` (`--until` changes the list). Right after a prompt it first waits up to 10 s for the agent to start working.
+- `list` shows the parent of each agent in the last column (`parent` in the JSON).
+
+#### The tree of agents
+
+`spawn` stores the caller's pane (`$TMUX_PANE`) as the pane option `@agent_parent` of the new agent. The sidebar shows the new agent under its parent, indented, with tree lines:
+
+```
+ ○ 1 lead ▾3                        84k
+ │ ⎇ main
+ │ ⌂ ~/repos/app
+ │ ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄
+ ├─◐ 2 api ▾1                       31k
+ │ │ ⎇ feat/api
+ │ │ ⊕ ~/repos/app-worktrees/feat-api [wt]
+ │ │ ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄
+ │ └─● 3 tests                      12k
+ │     ⎇ feat/tests
+ │     ⊕ ~/repos/app-worktrees/feat-tests [wt]
+ │   ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄
+ └─● 4 docs                          9k
+     ⎇ docs/update
+     ⊕ ~/repos/app-worktrees/docs-update [wt]
+```
+
+- `▾n`: n agents below it. `Space` folds them: `▸n` and the counts of their statuses (for example `▸3 ●1 ◐1`), so you still see that one of them waits for you. The folds are shared by all sidebars (`@agent_sidebar_folded`).
+- When you go into a folded agent's child (`prefix Tab`, tmux keys), the sidebar selects the folded parent.
+- The window order follows the tree, so the sidebar numbers are the window numbers (`prefix 1`–`9`, F-keys): `spawn` opens the child's window right after the windows of its parent and the parent's other children (`new-window -a`).
+- `J` / `K` on a child swap it only with its siblings. A parent moves together with its children, and their windows move too.
+- The children are normal agents: you can show them, type into them and close them. When the parent closes, its children move to the top level.
+- A child in another session than its parent shows at the top level of its session.
+- After a tmux-resurrect restore, `resume` restores the links (the state file stores the parent's position).
 
 ### Resume after a tmux restart
 
@@ -159,7 +191,7 @@ The data comes from `~/.local/state/tmux-agent-sidebar/agents.json` (`$XDG_STATE
 | Symbol      | Meaning |
 |-------------|---------|
 | `●` red     | Waiting for you to accept: a permission prompt or a question |
-| `●` green   | Finished, and you did not look at it yet. It turns idle when you show the agent. |
+| `●` green   | Finished, and you did not look at it yet. It turns idle when you show the agent: with `Enter`, a number, a click, `prefix Tab`, or when you go to its window or pane with tmux keys. All sidebars show the change at once. |
 | `◐` yellow  | Working (it spins) |
 | `○` gray    | Idle. Also after you stop the agent (`Esc`, `Ctrl+C`) or reject a permission prompt. |
 | `?`         | No hook data yet (for example, a session started before the installation) |
@@ -175,7 +207,7 @@ Next to the branch: `↑n` commits ahead of the upstream, `↓n` behind, `●n` 
 | Worktree directory | `set -g @agent_sidebar_worktree_dir DIR` | `<repo>/../<repo>-worktrees` |
 | Resume after restore | `set -g @agent_sidebar_resume off` | on |
 | UI language | `LANG` and `STRINGS` in `src/config.rs` (only `en` for now) | `en` |
-| Key bindings | `agent-sidebar.tmux` | `prefix a`, `prefix Tab`, `Ctrl+a` |
+| Key bindings | `agent-sidebar.tmux` | `prefix a`, `prefix Tab`, `Ctrl+Alt+a` |
 
 To choose a background color, press `c` in the sidebar until you like the color. The number shows in the top-right corner for 3 seconds. Write it into your tmux config to keep it after a tmux restart.
 
@@ -188,6 +220,7 @@ To choose a background color, press `c` in the sidebar until you like the color.
   - `@agent_sidebar_home`
   - `@agent_sidebar_bg`
   - `@agent_sidebar_order`
+  - `@agent_sidebar_folded` (the folded agents: their children are hidden)
   - `@agent_sidebar_gen` (changes when `J`/`K` swaps windows, so the other sidebars collect the data again)
   - `@agent_sidebar_width` (the sidebar width, for the tmux hooks)
 - **Fast selection sync.** A selection change sends `F12` to the other sidebar panes, so they redraw at once. `Enter` waits (max ~150 ms) until the target window's sidebar has drawn the new selection, then it switches the window.
@@ -210,7 +243,8 @@ To choose a background color, press `c` in the sidebar until you like the color.
   - Claude Code writes the state of each session (`busy`, `waiting`, `idle`) to `~/.claude/sessions/<pid>.json`. The sidebar finds the `claude` process of the pane and reads this file. When the pane runs only a client of a background session (`parkedJobId`), the sidebar reads the file of the background session (`jobId`). The file is correct at once, also after `Esc`, `Ctrl+C` or a rejected permission prompt, when no hook runs.
   - Every 0.1 s each sidebar checks these files (only a `stat` when nothing changed), so a status change shows in about 50 ms.
   - When a turn ends (`busy` → `idle`), the last message of the transcript tells how. An assistant reply that ended the turn means "finished": green, or idle when you look at the agent. Your prompt or `[Request interrupted by user]` at the end means you stopped it: idle.
-  - `hooks/claude-hook.sh` runs on Claude Code hook events. It stores `@agent_status`, `@agent_ts` and `@agent_transcript` as tmux pane options. Its `Stop` event also sets "done". No hook runs for a background session.
+  - `hooks/claude-hook.sh` runs on Claude Code hook events. It stores `@agent_status`, `@agent_ts` and `@agent_transcript` as tmux pane options. Its `Stop` event also sets "done", unless you look at the agent (its window is visible and it has the focus, or the sidebar has the focus and selects it). No hook runs for a background session.
+  - Each sidebar reads `@agent_status` of all panes in the same tmux call as its state poll (on `F12` and every 1 s), so a change that another sidebar or a hook makes shows at once, without waiting for the worker.
   - Only a permission prompt or a question makes the dot red. A late notification after the turn ended does not.
   - Without a session file (older Claude Code), the sidebar uses the hook status. It sets idle when the transcript ends with `[Request interrupted by user]`, or when the `idle_prompt` notification comes (after about 60 s).
 - **Tokens.** The context size comes from the `usage` of the last assistant message in the session transcript (input + cache + output tokens).
@@ -226,7 +260,7 @@ To choose a background color, press `c` in the sidebar until you like the color.
 | `src/agents.rs` | `spawn`, `prompt`, `list`, `wait`, `read`: start and drive agents |
 | `src/ui.rs` | Sidebar TUI: keys, worker thread, follow, filters, J/K, colors |
 | `src/screen.rs` | Cell buffer that writes only changed cells (like curses) |
-| `src/model.rs` | Agents from tmux panes, sorting |
+| `src/model.rs` | Agents from tmux panes, sorting, the tree of agents (`@agent_parent`) |
 | `src/live.rs` | Claude Code session files (`~/.claude/sessions`), background sessions |
 | `src/transcript.rs` | Context tokens and turn end from the transcript |
 | `src/git.rs` | Branch, worktree, ahead/behind and changes |
@@ -248,7 +282,7 @@ To choose a background color, press `c` in the sidebar until you like the color.
 
 1. Remove the `source-file .../agent-sidebar.tmux` line from `~/.tmux.conf`, and the links `~/.local/bin/agent-sidebar` and `~/.claude/skills/tmux-agents`.
 2. Remove the `claude-hook.sh` entries from `~/.claude/settings.json`.
-3. Restart tmux, or unbind `prefix a` / `prefix Tab` / `Ctrl+a` (`unbind -n C-a`), remove the `[42]` hooks and `@resurrect-hook-post-restore-all` by hand.
+3. Restart tmux, or unbind `prefix a` / `prefix Tab` / `Ctrl+Alt+a` (`unbind -n C-M-a`), remove the `[42]` hooks and `@resurrect-hook-post-restore-all` by hand.
 
 ## License
 
