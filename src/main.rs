@@ -5,7 +5,9 @@
 //!
 //! Usage:
 //!   agent-sidebar            # TUI of one sidebar pane
-//!   agent-sidebar toggle     # turn the sidebars on/off in all windows
+//!   agent-sidebar toggle     # turn the sidebar on/off in the current session
+//!   agent-sidebar reload     # restart the sidebars of the sessions that have them on
+//!   agent-sidebar load       # tmux loads the config: read the saved sessions
 //!   agent-sidebar ensure W   # tmux hook: add a sidebar to window W if it has none
 //!   agent-sidebar focus W    # Ctrl+Alt+a: add a sidebar to window W if needed, go into it
 //!   agent-sidebar next       # jump to the agent that is waiting for you
@@ -28,26 +30,44 @@ mod worktree;
 use config::{status_def, t};
 use model::collect_agents;
 use panes::{ensure, jump, sidebar_in};
-use tmux::{current_session, gopt, sidebar_panes};
+use tmux::{current_session, gopt, sidebar_on, sidebar_panes, sidebar_panes_in};
 
+/// Turn the sidebar on or off in the current session. Each session has its
+/// own `@agent_sidebar_on`; the state file keeps it over a tmux restart.
 fn cmd_toggle() {
-    if gopt("@agent_sidebar_on") == "1" {
-        tmux!["set-option", "-gu", "@agent_sidebar_on"];
-        for pane in sidebar_panes() {
+    resume::migrate_global();
+    let here = tmux!["display-message", "-p", "#{session_id}\t#{session_name}\t#{window_id}"];
+    let mut f = here.trim_end_matches('\n').split('\t');
+    let (Some(session), Some(name), Some(window)) = (f.next(), f.next(), f.next()) else { return };
+    if sidebar_on(session) {
+        tmux!["set-option", "-u", "-t", session, "@agent_sidebar_on"];
+        for pane in sidebar_panes_in(session) {
             tmux!["kill-pane", "-t", pane];
         }
-        resume::forget_sidebars();
+        resume::session_toggled(name, false);
         return;
     }
-    tmux!["set-option", "-g", "@agent_sidebar_on", "1"];
-    tmux!["set-option", "-g", "@agent_sidebar_home", current_session(None)];
-    let here = tmux!["display-message", "-p", "#{window_id}"].trim().to_string();
+    tmux!["set-option", "-t", session, "@agent_sidebar_on", "1"];
+    tmux!["set-option", "-g", "@agent_sidebar_home", name];
+    resume::session_toggled(name, true);
     // all windows at once: each one is resized only this one time
-    for window in tmux!["list-windows", "-a", "-F", "#{window_id}"].split_whitespace() {
+    for window in tmux!["list-windows", "-t", session, "-F", "#{window_id}"].split_whitespace() {
         ensure(window);
     }
-    if let Some(sb) = sidebar_in(&here) {
+    if let Some(sb) = sidebar_in(window) {
         tmux!["select-pane", "-t", sb];
+    }
+}
+
+/// Close all sidebar panes and start them again in the sessions that have
+/// the sidebar on (after an update of the binary).
+fn cmd_reload() {
+    resume::migrate_global();
+    for pane in sidebar_panes() {
+        tmux!["kill-pane", "-t", pane];
+    }
+    for window in tmux!["list-windows", "-a", "-F", "#{window_id}"].split_whitespace() {
+        ensure(window);
     }
 }
 
@@ -90,6 +110,8 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("toggle") => return cmd_toggle(),
+        Some("reload") => return cmd_reload(),
+        Some("load") => return resume::cmd_load(),
         Some("ensure") => {
             ensure(args.get(1).map(String::as_str).unwrap_or(""));
             return;

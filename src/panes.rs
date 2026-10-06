@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use crate::config::SIDEBAR_WIDTH;
 use crate::model::Agent;
-use crate::tmux::gopt;
+use crate::tmux::sidebar_on;
 
 pub fn sidebar_in(window: &str) -> Option<String> {
     tmux!["list-panes", "-t", window, "-F", "#{pane_id}\t#{@agent_sidebar}"]
@@ -24,9 +24,10 @@ fn self_command() -> String {
     format!("'{}'", exe.replace('\'', "'\\''"))
 }
 
-/// Add a sidebar to the window (keeps the active pane). Returns its id.
+/// Add a sidebar to the window when its session has the sidebar on (keeps
+/// the active pane). Returns its id.
 pub fn ensure(window: &str) -> Option<String> {
-    if window.is_empty() || gopt("@agent_sidebar_on") != "1" {
+    if window.is_empty() || !sidebar_on(window) {
         return None;
     }
     if let Some(sb) = sidebar_in(window) {

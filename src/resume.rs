@@ -5,17 +5,20 @@
 //! tmux-resurrect restores panes as plain shells; its post-restore hook runs
 //! `agent-sidebar resume`, which starts `claude --resume <id>` in each agent
 //! pane and closes the panes that were sidebars.
+//!
+//! The state file also keeps the names of the sessions with the sidebar on,
+//! so a session gets its sidebar back after a tmux restart.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 
 use serde_json::{json, Value};
 
-use crate::config::SIDEBAR_WIDTH;
+use crate::config::{ORDER_SEP, SIDEBAR_WIDTH};
 use crate::live::CLAUDE_DIR;
 use crate::model::Agent;
 use crate::panes::ensure;
-use crate::tmux::{current_session, gopt};
+use crate::tmux::{current_session, gopt, sidebar_on};
 use crate::transcript::project_dir_name;
 
 const SHELLS: [&str; 9] = ["bash", "zsh", "fish", "sh", "dash", "ksh", "tcsh", "nu", "elvish"];
@@ -28,8 +31,87 @@ pub fn state_file() -> PathBuf {
     PathBuf::from(base).join("tmux-agent-sidebar").join("agents.json")
 }
 
+/// The names of the sessions with the sidebar on, as `:a:b:` (tmux does not
+/// allow ":" in session names). The `session-created` hook turns the sidebar
+/// on in a new session with one of these names.
+pub const SAVED_OPT: &str = "@agent_sidebar_saved";
+/// Set by tmux-resurrect's pre-restore hook until `resume` runs: a restored
+/// session must not get a sidebar while resurrect restores its panes.
+pub const RESTORING_OPT: &str = "@agent_sidebar_restoring";
+
+fn split_names(s: &str) -> Vec<String> {
+    s.split(ORDER_SEP).filter(|n| !n.is_empty()).map(str::to_string).collect()
+}
+
+fn join_names(names: &[String]) -> String {
+    if names.is_empty() {
+        return String::new();
+    }
+    format!("{ORDER_SEP}{}{ORDER_SEP}", names.join(ORDER_SEP))
+}
+
+/// The saved names, updated with the live sessions (`name=on:` each): a live
+/// session counts as it is now, a session that is gone keeps its saved state.
+fn merge_sessions(saved: &str, live: &str) -> Vec<String> {
+    let mut names = split_names(saved);
+    for entry in live.split(ORDER_SEP) {
+        let Some((name, on)) = entry.rsplit_once('=') else { continue };
+        let known = names.iter().any(|n| n == name);
+        if on == "1" && !known {
+            names.push(name.to_string());
+        } else if on != "1" && known {
+            names.retain(|n| n != name);
+        }
+    }
+    names
+}
+
+/// Update `@agent_sidebar_saved` from the live sessions. Returns the names.
+pub fn sync_sessions() -> Vec<String> {
+    let out = tmux!["display-message", "-p",
+                    format!("#{{{SAVED_OPT}}}\t#{{S:#{{session_name}}=#{{@agent_sidebar_on}}{ORDER_SEP}}}")];
+    let Some((saved, live)) = out.trim_end_matches('\n').split_once('\t') else {
+        return split_names(&gopt(SAVED_OPT));
+    };
+    let names = merge_sessions(saved, live);
+    let value = join_names(&names);
+    if value != saved {
+        tmux!["set-option", "-g", SAVED_OPT, value];
+    }
+    names
+}
+
+/// Before per-session sidebars, `@agent_sidebar_on` was global: move it to
+/// every session.
+pub fn migrate_global() {
+    if gopt("@agent_sidebar_on") != "1" {
+        return;
+    }
+    tmux!["set-option", "-gu", "@agent_sidebar_on"];
+    for session in tmux!["list-sessions", "-F", "#{session_id}"].split_whitespace() {
+        tmux!["set-option", "-t", session, "@agent_sidebar_on", "1"];
+    }
+}
+
+/// `agent-sidebar load`: run when tmux loads `agent-sidebar.tmux`. Reads the
+/// saved session names into `@agent_sidebar_saved` (after a tmux restart).
+pub fn cmd_load() {
+    migrate_global();
+    if gopt(SAVED_OPT).is_empty()
+        && let Ok(text) = std::fs::read_to_string(state_file())
+        && let Ok(state) = serde_json::from_str::<Value>(&text)
+    {
+        let names: Vec<String> = state["sessions"].as_array().into_iter().flatten()
+            .filter_map(Value::as_str).map(str::to_string).collect();
+        if !names.is_empty() {
+            tmux!["set-option", "-g", SAVED_OPT, join_names(&names)];
+        }
+    }
+    sync_sessions();
+}
+
 /// The state as JSON. Only agents with a running claude and a session id.
-pub fn snapshot(agents: &[Agent], sidebars: &[String]) -> String {
+pub fn snapshot(agents: &[Agent], sidebars: &[String], sessions: &[String]) -> String {
     let agents: Vec<Value> = agents
         .iter()
         .filter_map(|a| {
@@ -41,7 +123,7 @@ pub fn snapshot(agents: &[Agent], sidebars: &[String]) -> String {
             Some(json!({"position": a.position, "session_id": id, "cwd": a.cwd, "parent": parent}))
         })
         .collect();
-    serde_json::to_string_pretty(&json!({"agents": agents, "sidebars": sidebars}))
+    serde_json::to_string_pretty(&json!({"agents": agents, "sidebars": sidebars, "sessions": sessions}))
         .unwrap_or_default()
 }
 
@@ -58,16 +140,30 @@ pub fn save(content: &str) {
     }
 }
 
-/// The sidebars are off: no sidebar panes to close after a restore.
-pub fn forget_sidebars() {
-    let Ok(text) = std::fs::read_to_string(state_file()) else { return };
-    let Ok(mut state) = serde_json::from_str::<Value>(&text) else { return };
-    state["sidebars"] = json!([]);
+/// The sidebar was turned on or off in a session: save the session names.
+/// Off: the session has no sidebar panes to close after a restore.
+pub fn session_toggled(session: &str, on: bool) {
+    let sessions = sync_sessions();
+    let mut state = std::fs::read_to_string(state_file())
+        .ok()
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        .filter(Value::is_object)
+        .unwrap_or_else(|| json!({"agents": [], "sidebars": []}));
+    state["sessions"] = json!(sessions);
+    if !on {
+        let prefix = format!("{session}:");
+        let kept: Vec<Value> = state["sidebars"].as_array().into_iter().flatten()
+            .filter(|p| !p.as_str().is_some_and(|p| p.starts_with(&prefix)))
+            .cloned()
+            .collect();
+        state["sidebars"] = json!(kept);
+    }
     save(&serde_json::to_string_pretty(&state).unwrap_or_default());
 }
 
 /// `agent-sidebar resume`: run by tmux-resurrect after a restore.
 pub fn cmd_resume() {
+    tmux!["set-option", "-gu", RESTORING_OPT];
     if gopt("@agent_sidebar_resume") == "off" {
         return;
     }
@@ -122,15 +218,28 @@ pub fn cmd_resume() {
             tmux!["kill-pane", "-t", pane];
         }
     }
-    if resumed > 0 {
-        // turn the sidebars on again
-        tmux!["set-option", "-g", "@agent_sidebar_on", "1"];
+    // turn the sidebars on again: in the saved sessions, or (an older state
+    // file without them) in all sessions when an agent was resumed
+    let saved = state["sessions"].as_array().map(|names| {
+        names.iter().filter_map(Value::as_str).map(str::to_string).collect::<Vec<_>>()
+    });
+    let mut any = false;
+    for line in tmux!["list-sessions", "-F", "#{session_id}\t#{session_name}"].lines() {
+        let Some((id, name)) = line.split_once('\t') else { continue };
+        if saved.as_ref().map_or(resumed > 0, |s| s.iter().any(|n| n == name)) {
+            tmux!["set-option", "-t", id, "@agent_sidebar_on", "1"];
+        }
+        any |= sidebar_on(id);
+    }
+    if any {
         if gopt("@agent_sidebar_home").is_empty() {
             tmux!["set-option", "-g", "@agent_sidebar_home", current_session(None)];
         }
         for window in tmux!["list-windows", "-a", "-F", "#{window_id}"].split_whitespace() {
             ensure(window);
         }
+    }
+    if resumed > 0 {
         tmux!["display-message", format!("{} {resumed}", crate::config::t().resumed)];
     }
 }
@@ -147,10 +256,22 @@ mod tests {
         let mut b = a.clone();
         b.session_id = None;
         a.cwd = "/repo".into();
-        let v: Value = serde_json::from_str(&snapshot(&[a, b], &["agents:1.1".into()])).unwrap();
+        let v: Value =
+            serde_json::from_str(&snapshot(&[a, b], &["agents:1.1".into()], &["agents".into()])).unwrap();
         assert_eq!(v["agents"].as_array().unwrap().len(), 1);
         assert_eq!(v["agents"][0]["session_id"], "abc");
         assert_eq!(v["sidebars"][0], "agents:1.1");
+        assert_eq!(v["sessions"][0], "agents");
+    }
+
+    #[test]
+    fn merge_sessions_keeps_gone_sessions() {
+        // a: on now; b: off now; c: gone, was on; d: new and on
+        let names = merge_sessions(":a:b:c:", "a=1:b=:d=1:");
+        assert_eq!(names, ["a", "c", "d"]);
+        assert_eq!(join_names(&names), ":a:c:d:");
+        assert_eq!(merge_sessions("", "x=:"), Vec::<String>::new());
+        assert_eq!(join_names(&[]), "");
     }
 
     #[test]
@@ -161,7 +282,7 @@ mod tests {
         let mut c = crate::model::test_agent("%7", "agents", Some("%1"));
         c.position = "agents:3.1".into();
         c.session_id = Some("c".into());
-        let v: Value = serde_json::from_str(&snapshot(&[p, c], &[])).unwrap();
+        let v: Value = serde_json::from_str(&snapshot(&[p, c], &[], &[])).unwrap();
         assert_eq!(v["agents"][0]["parent"], Value::Null);
         assert_eq!(v["agents"][1]["parent"], "agents:1.1");
     }

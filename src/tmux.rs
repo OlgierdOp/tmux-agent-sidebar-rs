@@ -55,11 +55,25 @@ pub fn current_session(pane: Option<&str>) -> String {
 
 /// Sidebar panes (pane ids) of the whole server.
 pub fn sidebar_panes() -> Vec<String> {
-    tmux!["list-panes", "-a", "-F", "#{pane_id}\t#{@agent_sidebar}"]
-        .lines()
+    parse_sidebars(&tmux!["list-panes", "-a", "-F", "#{pane_id}\t#{@agent_sidebar}"])
+}
+
+/// Sidebar panes (pane ids) in the windows of one session.
+pub fn sidebar_panes_in(session: &str) -> Vec<String> {
+    parse_sidebars(&tmux!["list-panes", "-s", "-t", session, "-F", "#{pane_id}\t#{@agent_sidebar}"])
+}
+
+fn parse_sidebars(out: &str) -> Vec<String> {
+    out.lines()
         .filter_map(|line| {
             let (pane, flag) = line.split_once('\t')?;
             (flag == "1").then(|| pane.to_string())
         })
         .collect()
+}
+
+/// The sidebar is on in the session of this target (session, window or pane).
+/// `@agent_sidebar_on` is a session option: each session has its own.
+pub fn sidebar_on(target: &str) -> bool {
+    tmux!["display-message", "-p", "-t", target, "#{@agent_sidebar_on}"].trim() == "1"
 }

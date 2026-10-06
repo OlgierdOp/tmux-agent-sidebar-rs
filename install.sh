@@ -60,16 +60,17 @@ fi
 
 # --- start it in the running tmux
 if tmux list-sessions >/dev/null 2>&1; then
-  # turn off the running sidebars (Python or Rust): they are all marked @agent_sidebar
-  if [ "$(tmux show -gqv @agent_sidebar_on)" = 1 ]; then
-    "$BIN" toggle
-  fi
   # an error elsewhere in the config must not stop the install: load our file in any case
   tmux source-file "$TMUX_CONF" || echo "! $TMUX_CONF has errors (see above)"
   tmux source-file "$SNIPPET"
-  if [ -n "${TMUX:-}" ]; then
+  # restart the running sidebars (Python or Rust: they are all marked @agent_sidebar)
+  # in the sessions that have the sidebar on
+  "$BIN" reload
+  if [ -n "${TMUX:-}" ] && [ "$(tmux display -p '#{@agent_sidebar_on}')" != 1 ]; then
     "$BIN" toggle
-    echo "✓ sidebar is on. prefix + a hides it."
+  fi
+  if [ -n "${TMUX:-}" ]; then
+    echo "✓ sidebar is on in this session. prefix + a hides it."
   else
     echo "✓ tmux reloaded. Press prefix + a in tmux to show the sidebar."
   fi

@@ -176,7 +176,8 @@ fn worker(shared: Arc<Mutex<Shared>>, wake: Arc<Wake>) {
         let (mut agents, sidebars) = collect(home.as_deref(), &order);
         // the visible sidebar keeps the resume file up to date (written on change only)
         if visible {
-            let snap = crate::resume::snapshot(&agents, &sidebars);
+            let sessions = crate::resume::sync_sessions();
+            let snap = crate::resume::snapshot(&agents, &sidebars, &sessions);
             if snap != saved {
                 crate::resume::save(&snap);
                 saved = snap;

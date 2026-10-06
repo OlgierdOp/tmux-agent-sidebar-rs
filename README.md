@@ -54,7 +54,7 @@ cd tmux-agent-sidebar-rs
 2. adds `hooks/claude-hook.sh` to the hooks in `~/.claude/settings.json` and removes the hook of the Python version,
 3. adds `source-file .../agent-sidebar.tmux` to `~/.tmux.conf`, in place of the Python version's line, or before the TPM init line,
 4. links the binary as `~/.local/bin/agent-sidebar` and the skill `skills/tmux-agents` into `~/.claude/skills/`, so Claude Code agents can start other agents,
-5. in a running tmux: turns off the running sidebars, reloads the config and turns the sidebar on.
+5. in a running tmux: reloads the config, restarts the running sidebars (`agent-sidebar reload`) and turns the sidebar on in the current session.
 
 Before it changes a file, the script makes a backup (`*.bak.<timestamp>`). You can run it more than once. An error elsewhere in `~/.tmux.conf` does not stop it. Running Claude Code sessions pick up the new hooks on their next event.
 
@@ -73,9 +73,9 @@ Before it changes a file, the script makes a backup (`*.bak.<timestamp>`). You c
 
 | Key          | Action |
 |--------------|--------|
-| `prefix a`   | Show/hide the sidebar in all windows |
+| `prefix a`   | Show/hide the sidebar in all windows of the current session |
 | `prefix Tab` | Go into the agent that waits for you (red first, then green, current session first) |
-| `Ctrl+Alt+a` | Go into the sidebar of the current window, from any pane (no prefix). Turns the sidebar on when it is off. On macOS the terminal must send Option as Meta (iTerm2: Profiles → Keys → Left Option key: Esc+; Terminal: Use Option as Meta key). |
+| `Ctrl+Alt+a` | Go into the sidebar of the current window, from any pane (no prefix). Turns the sidebar on in this session when it is off. On macOS the terminal must send Option as Meta (iTerm2: Profiles → Keys → Left Option key: Esc+; Terminal: Use Option as Meta key). |
 
 Keys in the sidebar:
 
@@ -107,13 +107,24 @@ When you show an agent with `Enter`, the agent becomes the last active pane in i
 
 The selection follows you. If you move to another agent with tmux keys or a script (`select-window`, `select-pane`), the sidebar selects that agent.
 
+### On and off per session
+
+Each tmux session has its own sidebar switch: `prefix a` turns the sidebar on or off in all windows of the current session only. Other sessions keep their state. When you switch to a session with the sidebar off, it gets no sidebar panes. The list in a sidebar still shows the agents of all sessions.
+
+The sidebar remembers the state by session name. The names of the sessions with the sidebar on are in the state file (`~/.local/state/tmux-agent-sidebar/agents.json`, key `sessions`), and while tmux runs in `@agent_sidebar_saved`. After a tmux restart:
+
+- a new session with a saved name gets the sidebar at once (the `session-created` hook),
+- with tmux-resurrect, `resume` turns the sidebar on in the restored sessions with a saved name (see below).
+
+A session that closes keeps its saved state. Only `prefix a` in a session with that name changes it.
+
 ### Search and filters
 
 The search and the state filters are local to one sidebar pane, so two tmux clients can use different filters. The active filters show in the title line, for example `[waiting /api]`. The counts in the title line always cover all agents. The numbers `1`–`9`, `j`/`k` and `Tab` work on the filtered list. While a filter or a search is active, the list is flat (no tree).
 
 ### Sessions
 
-Agents are grouped by tmux session. The home session is the session where you turned the sidebar on, and it is at the top by default.
+Agents are grouped by tmux session. The home session is the session where you last turned the sidebar on, and it is at the top by default.
 
 To change the order, select an agent and press `J` (down) or `K` (up):
 
@@ -182,9 +193,11 @@ With tmux-resurrect, a restore brings the panes back as plain shells. `agent-sid
 
 1. types `claude --resume <session id>` in each restored shell that ran an agent, when the shell is in the same directory and the session's transcript still exists,
 2. closes the restored panes that were sidebars (plain shells with the sidebar's width at the left edge),
-3. turns the sidebars on.
+3. turns the sidebar on in the restored sessions with a saved name (an older state file without the names: in all sessions).
 
-The data comes from `~/.local/state/tmux-agent-sidebar/agents.json` (`$XDG_STATE_HOME`), which the visible sidebar keeps up to date. Turn it off with `set -g @agent_sidebar_resume off`. If you set `@resurrect-hook-post-restore-all` yourself, load `agent-sidebar.tmux` before your line and call `agent-sidebar resume` from your hook.
+While resurrect restores the panes, no session gets a sidebar: `agent-sidebar.tmux` also sets `@resurrect-hook-pre-restore-all`, which sets `@agent_sidebar_restoring` until `resume` runs.
+
+The data comes from `~/.local/state/tmux-agent-sidebar/agents.json` (`$XDG_STATE_HOME`), which the visible sidebar keeps up to date. Turn it off with `set -g @agent_sidebar_resume off`. If you set `@resurrect-hook-post-restore-all` or `@resurrect-hook-pre-restore-all` yourself, load `agent-sidebar.tmux` before your line, call `agent-sidebar resume` from your post-restore hook and `tmux set -g @agent_sidebar_restoring 1` from your pre-restore hook.
 
 ### Statuses
 
@@ -213,8 +226,7 @@ To choose a background color, press `c` in the sidebar until you like the color.
 
 ## How it works
 
-- **One sidebar pane per window.** A switch between windows does not move or resize panes, so nothing flickers. The panes share their state through global tmux options:
-  - `@agent_sidebar_on`
+- **One sidebar pane per window.** A switch between windows does not move or resize panes, so nothing flickers. `@agent_sidebar_on` is a session option: the sidebar is on or off per session, and the tmux formats in the hooks read the value of their session. The panes share their other state through global tmux options:
   - `@agent_sidebar_sel`
   - `@agent_sidebar_only`
   - `@agent_sidebar_home`
@@ -223,9 +235,11 @@ To choose a background color, press `c` in the sidebar until you like the color.
   - `@agent_sidebar_folded` (the folded agents: their children are hidden)
   - `@agent_sidebar_gen` (changes when `J`/`K` swaps windows, so the other sidebars collect the data again)
   - `@agent_sidebar_width` (the sidebar width, for the tmux hooks)
+  - `@agent_sidebar_saved` (the names of the sessions with the sidebar on, `:a:b:`; `agent-sidebar load` reads them from the state file when tmux loads `agent-sidebar.tmux`, the visible sidebar and `prefix a` write them back)
+  - `@agent_sidebar_restoring` (set while tmux-resurrect restores)
 - **Fast selection sync.** A selection change sends `F12` to the other sidebar panes, so they redraw at once. `Enter` waits (max ~150 ms) until the target window's sidebar has drawn the new selection, then it switches the window.
 - **Window, session and pane switches.** The tmux hooks `session-window-changed`, `client-session-changed`, `after-select-pane` and `after-new-window` do two things:
-  - they add a sidebar to a window on the first visit,
+  - they add a sidebar to a window on the first visit, when its session has the sidebar on,
   - they send `F12` to the sidebar of the window you switch to, so it redraws at once (a few ms).
 
   tmux evaluates the conditions itself, and `run-shell -C` runs a tmux command, so a normal switch starts no process.
@@ -234,7 +248,7 @@ To choose a background color, press `c` in the sidebar until you like the color.
   - a sidebar that got the closed pane's space shrinks back to its width,
   - the visible sidebars get `F12`. Each sidebar compares the list of all tmux pane ids with the last one, so the closed agent leaves the list at once (a few ms), without waiting for the worker.
 
-  tmux evaluates these hooks in the current window, not in the changed one, so the formats (`@agent_sidebar_close`, `@agent_sidebar_fit`, `@agent_sidebar_poke`) loop over the windows and build the commands. No process starts.
+  tmux evaluates these hooks in the current window, not in the changed one, so the conditions loop over the sessions (`#{S:#{@agent_sidebar_on}}`: on in any session) and the formats (`@agent_sidebar_close`, `@agent_sidebar_fit`, `@agent_sidebar_poke`) loop over the windows and build the commands. No process starts.
 - **Reliable selection follow.** The visible sidebar compares the current window and active pane with the last pair it handled (`@agent_sidebar_focus`). It compares states, not events, so fast switching cannot make it miss a change. Visibility comes from `window_active_clients`, because tmux updates `session_attached` lazily.
 - **Non-blocking UI.** A worker thread collects the agent data (process tree, git, tokens). The main loop only handles keys, `F12` and drawing, so it never waits for the data. Prompts, menus and confirmations (`command-prompt`, `display-menu`, `confirm-before`) run in the background, because tmux returns from them only when you close them. The worktree work runs in `agent-sidebar worktree-*` commands that tmux starts.
 - **Drawing.** `src/screen.rs` keeps a cell buffer and writes only the cells that changed, with the same color codes that curses writes for `tmux-256color`.
@@ -256,7 +270,7 @@ To choose a background color, press `c` in the sidebar until you like the color.
 
 | File | Purpose |
 |------|---------|
-| `src/main.rs` | Commands (`toggle`, `ensure`, `focus`, `next`, `resume`, `spawn`, `prompt`, `list`, `wait`, `read`, `worktree-*`, `agent-new`) and the TUI entry |
+| `src/main.rs` | Commands (`toggle`, `reload`, `load`, `ensure`, `focus`, `next`, `resume`, `spawn`, `prompt`, `list`, `wait`, `read`, `worktree-*`, `agent-new`) and the TUI entry |
 | `src/agents.rs` | `spawn`, `prompt`, `list`, `wait`, `read`: start and drive agents |
 | `src/ui.rs` | Sidebar TUI: keys, worker thread, follow, filters, J/K, colors |
 | `src/screen.rs` | Cell buffer that writes only changed cells (like curses) |
@@ -265,7 +279,7 @@ To choose a background color, press `c` in the sidebar until you like the color.
 | `src/transcript.rs` | Context tokens and turn end from the transcript |
 | `src/git.rs` | Branch, worktree, ahead/behind and changes |
 | `src/worktree.rs` | `W` / `O` / `D` / `N`: add, open and remove worktrees, start claude in a new window |
-| `src/resume.rs` | State file and `resume` after a tmux-resurrect restore |
+| `src/resume.rs` | State file, the saved sessions with the sidebar on, and `resume` after a tmux-resurrect restore |
 | `src/procs/mod.rs` | Process tree: find the `claude` process of a pane |
 | `src/procs/linux.rs` | Linux backend (`/proc`) |
 | `src/procs/macos.rs` | macOS backend (libproc, `sysctl`) |
@@ -282,7 +296,7 @@ To choose a background color, press `c` in the sidebar until you like the color.
 
 1. Remove the `source-file .../agent-sidebar.tmux` line from `~/.tmux.conf`, and the links `~/.local/bin/agent-sidebar` and `~/.claude/skills/tmux-agents`.
 2. Remove the `claude-hook.sh` entries from `~/.claude/settings.json`.
-3. Restart tmux, or unbind `prefix a` / `prefix Tab` / `Ctrl+Alt+a` (`unbind -n C-M-a`), remove the `[42]` hooks and `@resurrect-hook-post-restore-all` by hand.
+3. Restart tmux, or unbind `prefix a` / `prefix Tab` / `Ctrl+Alt+a` (`unbind -n C-M-a`), remove the `[42]` hooks, `@resurrect-hook-pre-restore-all` and `@resurrect-hook-post-restore-all` by hand.
 
 ## License
 
